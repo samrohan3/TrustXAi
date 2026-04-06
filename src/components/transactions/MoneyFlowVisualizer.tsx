@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D, { type ForceGraphMethods, type NodeObject } from "react-force-graph-2d";
 import { Layers3, RotateCcw } from "lucide-react";
-import type { Transaction } from "@/data/mockData";
+import type { Transaction } from "@/types/domain";
 import type { AccountRiskScore } from "@/lib/accountRiskScoring";
 import { cn } from "@/lib/utils";
 

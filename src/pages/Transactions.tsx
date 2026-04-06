@@ -9,7 +9,7 @@ import {
 } from "recharts";
 import SectionReveal from "@/components/shared/SectionReveal";
 import { useAuth } from "@/contexts/AuthContext";
-import { transactions, type Transaction } from "@/data/mockData";
+import type { Transaction } from "@/types/domain";
 import { useAnimatedCounter } from "@/hooks/useAnimatedCounter";
 import AccountRiskScorePanel from "@/components/transactions/AccountRiskScorePanel";
 import MoneyFlowVisualizer from "@/components/transactions/MoneyFlowVisualizer";
@@ -32,20 +32,6 @@ const statusBadge: Record<string, string> = {
 };
 
 const PAGE_SIZE = 5;
-
-// Extended transactions for pagination demo
-const extendedTxs: Transaction[] = [
-  ...transactions,
-  { id: "TXN-8304", from: "IndusInd ****6612", to: "Merchant #9982", amount: 8900, currency: "INR", timestamp: "2024-03-15T13:50:00Z", riskScore: 15, status: "approved", type: "POS Payment", institution: "IndusInd Bank" },
-  { id: "TXN-8305", from: "Federal ****3378", to: "Government Tax", amount: 125000, currency: "INR", timestamp: "2024-03-15T13:45:00Z", riskScore: 2, status: "approved", type: "NEFT", institution: "Federal Bank" },
-  { id: "TXN-8306", from: "Axis Bank ****7741", to: "Layered Account #1", amount: 340000, currency: "INR", timestamp: "2024-03-15T13:40:00Z", riskScore: 88, status: "blocked", type: "Wire Transfer", institution: "Axis Bank" },
-  { id: "TXN-8307", from: "SBI ****4492", to: "Medical Insurance", amount: 67000, currency: "INR", timestamp: "2024-03-15T13:35:00Z", riskScore: 4, status: "approved", type: "Auto-Debit", institution: "SBI" },
-  { id: "TXN-8308", from: "HDFC ****8829", to: "Crypto Mixer", amount: 920000, currency: "INR", timestamp: "2024-03-15T13:30:00Z", riskScore: 96, status: "blocked", type: "Online Transfer", institution: "HDFC Bank" },
-  { id: "TXN-8309", from: "Layered Account #1", to: "Offshore Account", amount: 310000, currency: "INR", timestamp: "2024-03-15T13:28:00Z", riskScore: 93, status: "flagged", type: "Layer Transfer", institution: "Axis Bank" },
-  { id: "TXN-8310", from: "Offshore Account", to: "Crypto Mixer", amount: 295000, currency: "INR", timestamp: "2024-03-15T13:24:00Z", riskScore: 95, status: "blocked", type: "Offshore Relay", institution: "External Network" },
-  { id: "TXN-8311", from: "Crypto Mixer", to: "Unknown Wallet 0xF3..a9", amount: 280000, currency: "INR", timestamp: "2024-03-15T13:20:00Z", riskScore: 98, status: "blocked", type: "Crypto Bridge", institution: "External Network" },
-  { id: "TXN-8312", from: "Multiple Recipients", to: "Layered Account #1", amount: 240000, currency: "INR", timestamp: "2024-03-15T13:16:00Z", riskScore: 82, status: "flagged", type: "Bulk Settlement", institution: "Axis Bank" },
-];
 
 type SortField = "riskScore" | "amount" | "timestamp";
 type SortDir = "asc" | "desc";
@@ -86,9 +72,9 @@ export default function Transactions() {
 
   const syncBackendData = useCallback(async () => {
     if (!authToken) {
-      setBackendRows(null);
+      setBackendRows([]);
       setBackendMetrics(null);
-      setSyncMessage("Backend auth token unavailable. Showing local demo dataset.");
+      setSyncMessage("Backend auth token unavailable. Sign in to load transaction telemetry.");
       return;
     }
 
@@ -110,9 +96,9 @@ export default function Transactions() {
       setSyncMessage(`Loaded ${rows.length.toLocaleString()} transaction rows from MongoDB.`);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Failed to fetch backend transactions.";
-      setBackendRows(null);
+      setBackendRows([]);
       setBackendMetrics(null);
-      setSyncMessage(`${detail} Falling back to local demo dataset.`);
+      setSyncMessage(detail);
     } finally {
       setIsSyncing(false);
     }
@@ -122,7 +108,7 @@ export default function Transactions() {
     void syncBackendData();
   }, [syncBackendData]);
 
-  const sourceTransactions = backendRows ?? extendedTxs;
+  const sourceTransactions = useMemo(() => backendRows ?? [], [backendRows]);
   const accountRiskScores = useMemo(() => computeAccountRiskScores(sourceTransactions), [sourceTransactions]);
 
   const uniqueTypes = useMemo(() => [...new Set(sourceTransactions.map(t => t.type))], [sourceTransactions]);
@@ -240,7 +226,7 @@ export default function Transactions() {
           <p className="text-sm text-muted-foreground mt-1">Filter, search, and inspect transactions in real-time</p>
           {syncMessage ? (
             <p className="text-[11px] text-muted-foreground mt-1.5">
-              Data Source: {backendRows ? "MongoDB" : "Local Fallback"} • {syncMessage}
+              {syncMessage}
             </p>
           ) : null}
         </div>

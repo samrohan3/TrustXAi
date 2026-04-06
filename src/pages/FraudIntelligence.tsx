@@ -32,15 +32,10 @@ import {
 import SectionReveal from "@/components/shared/SectionReveal";
 import { useAuth } from "@/contexts/AuthContext";
 import {
-  fraudDNAs as fallbackFraudDNAs,
-  transactions as fallbackTransactions,
   type FraudDNA,
   type Transaction,
-} from "@/data/mockData";
+} from "@/types/domain";
 import {
-  investigationCases as fallbackInvestigationCases,
-  investigationCaseOptions as fallbackInvestigationCaseOptions,
-  mergeInvestigationCases,
   type DetectionLabel,
   type MergedInvestigationData,
   type InvestigationCase,
@@ -82,33 +77,6 @@ const catColor: Record<string, string> = {
   Structuring: "bg-primary/10 text-primary",
   "Identity Fraud": "bg-destructive/10 text-destructive",
 };
-
-const threatTimeline = [
-  { time: "00:00", threats: 12, blocked: 12 },
-  { time: "04:00", threats: 8, blocked: 8 },
-  { time: "08:00", threats: 34, blocked: 33 },
-  { time: "12:00", threats: 56, blocked: 54 },
-  { time: "16:00", threats: 42, blocked: 41 },
-  { time: "20:00", threats: 28, blocked: 27 },
-  { time: "Now", threats: 19, blocked: 19 },
-];
-
-const radarData = [
-  { subject: "Velocity", A: 92 },
-  { subject: "Amount", A: 78 },
-  { subject: "Geography", A: 65 },
-  { subject: "Network", A: 88 },
-  { subject: "Behavior", A: 95 },
-  { subject: "Identity", A: 72 },
-];
-
-const riskFactors = [
-  { label: "Velocity Stacking", score: 94, desc: "15 transactions in 2 min window" },
-  { label: "Shell Entity Link", score: 97, desc: "Destination linked to known shell corp" },
-  { label: "Cross-border Pattern", score: 82, desc: "Fiat to crypto to offshore routing" },
-  { label: "Amount Structuring", score: 89, desc: "Split transactions below threshold" },
-  { label: "New Account Risk", score: 76, desc: "Account age under 30 days with high volume" },
-];
 
 const defaultFilters: InvestigationFilters = {
   holderName: "",
@@ -247,14 +215,23 @@ const mapCaseOption = (option: BackendInvestigationCaseOption): CaseOption => ({
 const isSameCaseSelection = (left: string[], right: string[]) =>
   left.length === right.length && left.every((value, index) => value === right[index]);
 
+const EMPTY_MERGED_INVESTIGATION: MergedInvestigationData = {
+  selectedCases: [],
+  nodes: [],
+  edges: [],
+  sourceNodeIds: [],
+  destinationNodeIds: [],
+  pathRisks: [],
+  commonNodeIds: [],
+  sharedPatternLabels: [],
+};
+
 export default function FraudIntelligence() {
   const { authToken } = useAuth();
   const [selectedDNA, setSelectedDNA] = useState<FraudDNA | null>(null);
   const [activeTab, setActiveTab] = useState<"patterns" | "network" | "timeline">("patterns");
   const [investigationMode, setInvestigationMode] = useState(false);
-  const [selectedCaseIds, setSelectedCaseIds] = useState<string[]>([
-    fallbackInvestigationCases[0]?.caseId ?? "",
-  ]);
+  const [selectedCaseIds, setSelectedCaseIds] = useState<string[]>([]);
   const [filters, setFilters] = useState<InvestigationFilters>(defaultFilters);
   const [collapsedLayers, setCollapsedLayers] = useState<number[]>([]);
   const [timelineStep, setTimelineStep] = useState(1);
@@ -269,9 +246,9 @@ export default function FraudIntelligence() {
   const [mlSyncError, setMlSyncError] = useState<string | null>(null);
   const [mlSyncLoading, setMlSyncLoading] = useState(false);
 
-  const fraudDNAData = fraudDnaRows ?? fallbackFraudDNAs;
-  const caseOptions = investigationOptionsRows ?? fallbackInvestigationCaseOptions;
-  const transactionData = transactionRows ?? fallbackTransactions;
+  const fraudDNAData = useMemo(() => fraudDnaRows ?? [], [fraudDnaRows]);
+  const caseOptions = useMemo(() => investigationOptionsRows ?? [], [investigationOptionsRows]);
+  const transactionData = useMemo(() => transactionRows ?? [], [transactionRows]);
 
   const avgSimilarityValue = Math.round(
     fraudDNAData.reduce((sum, entry) => sum + entry.similarity, 0) / Math.max(fraudDNAData.length, 1),
@@ -279,15 +256,16 @@ export default function FraudIntelligence() {
 
   const totalPatterns = useAnimatedCounter(fraudDNAData.length, 800);
   const avgSimilarity = useAnimatedCounter(avgSimilarityValue, 1200, 200);
-  const activeThreats = useAnimatedCounter(19, 1000, 300);
+  const activeThreatValue = mergedInvestigationRows?.pathRisks.filter((path) => path.riskScore >= 75).length ?? 0;
+  const activeThreats = useAnimatedCounter(activeThreatValue, 1000, 300);
 
   const syncInvestigationWorkspace = useCallback(async () => {
     if (!authToken) {
-      setFraudDnaRows(null);
-      setInvestigationOptionsRows(null);
+      setFraudDnaRows([]);
+      setInvestigationOptionsRows([]);
       setMergedInvestigationRows(null);
-      setTransactionRows(null);
-      setIntelSyncMessage("Backend auth token unavailable. Showing local investigation dataset.");
+      setTransactionRows([]);
+      setIntelSyncMessage("Backend auth token unavailable. Sign in to load investigation telemetry.");
       return;
     }
 
@@ -319,11 +297,11 @@ export default function FraudIntelligence() {
     } catch (error) {
       const detail =
         error instanceof Error ? error.message : "Failed to load backend fraud-intelligence data.";
-      setFraudDnaRows(null);
-      setInvestigationOptionsRows(null);
+      setFraudDnaRows([]);
+      setInvestigationOptionsRows([]);
       setMergedInvestigationRows(null);
-      setTransactionRows(null);
-      setIntelSyncMessage(`${detail} Falling back to local investigation dataset.`);
+      setTransactionRows([]);
+      setIntelSyncMessage(detail);
     } finally {
       setIntelSyncLoading(false);
     }
@@ -432,12 +410,7 @@ export default function FraudIntelligence() {
     pipelineResults.get("fraud_detection_financial")?.metrics?.best_auc,
   );
 
-  const fallbackMergedInvestigation = useMemo(
-    () => mergeInvestigationCases(selectedCaseIds.filter(Boolean)),
-    [selectedCaseIds],
-  );
-
-  const mergedInvestigation = mergedInvestigationRows ?? fallbackMergedInvestigation;
+  const mergedInvestigation = mergedInvestigationRows ?? EMPTY_MERGED_INVESTIGATION;
 
   const nodeLookup = useMemo(
     () => Object.fromEntries(mergedInvestigation.nodes.map((node) => [node.id, node])),
@@ -774,6 +747,66 @@ export default function FraudIntelligence() {
     [graphEdges],
   );
 
+  const riskFactors = useMemo(
+    () =>
+      sortedPathRisks.slice(0, 5).map((entry) => ({
+        label: entry.label,
+        score: entry.riskScore,
+        desc: entry.explanation,
+      })),
+    [sortedPathRisks],
+  );
+
+  const radarData = useMemo(
+    () =>
+      aiDetectionSummary.map((entry) => ({
+        subject: entry.label,
+        A: entry.score,
+      })),
+    [aiDetectionSummary],
+  );
+
+  const threatTimeline = useMemo(() => {
+    const txStatusById = new Map(transactionData.map((tx) => [tx.id, tx.status]));
+    const grouped = new Map<string, { threats: number; blocked: number }>();
+
+    for (const edge of graphEdges) {
+      const key = new Date(edge.timestamp).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      const row = grouped.get(key) ?? { threats: 0, blocked: 0 };
+      row.threats += 1;
+      const status = txStatusById.get(edge.txRef);
+      if (status === "blocked") {
+        row.blocked += 1;
+      }
+      grouped.set(key, row);
+    }
+
+    const rows = Array.from(grouped.entries()).map(([time, metrics]) => ({
+      time,
+      threats: metrics.threats,
+      blocked: metrics.blocked,
+    }));
+
+    return rows.slice(-8);
+  }, [graphEdges, transactionData]);
+
+  const recentThreatEvents = useMemo(
+    () =>
+      sortedPathRisks.slice(0, 6).map((entry, index) => {
+        const relatedEdge = mergedInvestigation.edges[mergedInvestigation.edges.length - 1 - index];
+        const when = relatedEdge?.timestamp ?? new Date().toISOString();
+        return {
+          time: new Date(when).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          event: entry.explanation,
+          severity: entry.riskScore >= 90 ? "critical" : entry.riskScore >= 75 ? "high" : "medium",
+        };
+      }),
+    [mergedInvestigation.edges, sortedPathRisks],
+  );
+
   const updateCases = (caseIds: string[]) => {
     if (!caseIds.length) {
       const fallback = caseOptions[0]?.caseId;
@@ -802,7 +835,7 @@ export default function FraudIntelligence() {
           </p>
           {intelSyncMessage ? (
             <p className="text-[11px] text-muted-foreground mt-1.5">
-              Data Source: {fraudDnaRows ? "MongoDB" : "Local Fallback"} • {intelSyncMessage}
+              {intelSyncMessage}
             </p>
           ) : null}
         </div>
@@ -1506,7 +1539,7 @@ export default function FraudIntelligence() {
               <div className="glass rounded-xl p-5">
                 <h3 className="text-sm font-semibold mb-4">24h Threat Timeline</h3>
                 <ResponsiveContainer width="100%" height={280}>
-                  <AreaChart data={threatTimeline}>
+                  <AreaChart data={threatTimeline.length ? threatTimeline : [{ time: "-", threats: 0, blocked: 0 }]}>
                     <defs>
                       <linearGradient id="gradThreats" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="5%" stopColor="hsl(0, 72%, 51%)" stopOpacity={0.3} />
@@ -1550,14 +1583,7 @@ export default function FraudIntelligence() {
                 <h3 className="text-sm font-semibold mb-4">Recent Threat Events</h3>
                 <div className="relative pl-6 space-y-4">
                   <div className="absolute left-2 top-0 bottom-0 w-px bg-border" />
-                  {[
-                    { time: "14:24", event: "Layering Detected chain crossed offshore node", severity: "critical" },
-                    { time: "14:18", event: "Circular Flow found in merged case CASE-ML-2026-0617", severity: "high" },
-                    { time: "14:10", event: "Shell entity transfer linked through same IP cluster", severity: "critical" },
-                    { time: "13:58", event: "Smurfing Pattern with threshold split detected", severity: "high" },
-                    { time: "13:45", event: "Cross-border account relationship score exceeded 90", severity: "medium" },
-                    { time: "13:30", event: "Velocity Stacking in mule layer confirmed", severity: "medium" },
-                  ].map((entry, i) => (
+                  {recentThreatEvents.map((entry, i) => (
                     <motion.div
                       key={entry.time}
                       initial={{ opacity: 0, x: -10 }}
@@ -1595,6 +1621,9 @@ export default function FraudIntelligence() {
                       </div>
                     </motion.div>
                   ))}
+                  {!recentThreatEvents.length ? (
+                    <p className="text-xs text-muted-foreground">No threat events were generated for the current case selection.</p>
+                  ) : null}
                 </div>
               </div>
             </div>

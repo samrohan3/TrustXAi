@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
@@ -10,10 +11,21 @@ import {
   Activity,
   ArrowRight,
   AlertTriangle,
+  RotateCcw,
 } from "lucide-react";
 import SectionReveal from "@/components/shared/SectionReveal";
 import VisualMetricStrip from "@/components/shared/VisualMetricStrip";
-import { alerts, fraudDNAs, transactions } from "@/data/mockData";
+import { useAuth } from "@/contexts/AuthContext";
+import {
+  fetchAllTransactions,
+  fetchAnalystDashboardSummary,
+  fetchFraudAlerts,
+  fetchFraudDNA,
+  type BackendAlert,
+  type BackendDashboardSummary,
+  type BackendFraudDNA,
+  type BackendTransaction,
+} from "@/lib/backendApi";
 
 const analystActions = [
   {
@@ -43,35 +55,106 @@ const analystActions = [
 ];
 
 export default function AnalystDashboard() {
-  const highRiskTx = transactions.filter((transaction) => transaction.riskScore >= 80).length;
-  const blockedTx = transactions.filter((transaction) => transaction.status === "blocked").length;
-  const activeAlerts = alerts.length;
-  const criticalAlerts = alerts.filter((alert) => alert.severity === "critical").length;
+  const { authToken } = useAuth();
+  const [transactionRows, setTransactionRows] = useState<BackendTransaction[]>([]);
+  const [alertRows, setAlertRows] = useState<BackendAlert[]>([]);
+  const [fraudDnaRows, setFraudDnaRows] = useState<BackendFraudDNA[]>([]);
+  const [dashboardSummary, setDashboardSummary] = useState<BackendDashboardSummary | null>(null);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+
+  const syncAnalystData = useCallback(async () => {
+    if (!authToken) {
+      setTransactionRows([]);
+      setAlertRows([]);
+      setFraudDnaRows([]);
+      setDashboardSummary(null);
+      setSyncMessage("Backend auth token unavailable. Sign in to load analyst telemetry.");
+      return;
+    }
+
+    setSyncLoading(true);
+    setSyncMessage("Syncing analyst dashboard from backend...");
+
+    try {
+      const [summary, transactions, alerts, dna] = await Promise.all([
+        fetchAnalystDashboardSummary(),
+        fetchAllTransactions({ sortBy: "timestamp", sortDir: "desc", maxRecords: 20000 }),
+        fetchFraudAlerts(),
+        fetchFraudDNA(),
+      ]);
+
+      setDashboardSummary(summary);
+      setTransactionRows(transactions);
+      setAlertRows(alerts);
+      setFraudDnaRows(dna);
+      setSyncMessage(
+        `Loaded ${transactions.length.toLocaleString()} transactions, ${alerts.length} alerts, and ${dna.length} fraud DNA signatures.`,
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Failed to sync analyst dashboard.";
+      setDashboardSummary(null);
+      setTransactionRows([]);
+      setAlertRows([]);
+      setFraudDnaRows([]);
+      setSyncMessage(detail);
+    } finally {
+      setSyncLoading(false);
+    }
+  }, [authToken]);
+
+  useEffect(() => {
+    void syncAnalystData();
+  }, [syncAnalystData]);
+
+  const highRiskTx = transactionRows.filter((transaction) => transaction.risk_score >= 80).length;
+  const blockedTx = transactionRows.filter((transaction) => transaction.status === "blocked").length;
+  const activeAlerts = alertRows.length;
+  const criticalAlerts = alertRows.filter((alert) => alert.severity === "critical").length;
   const avgSimilarity = Math.round(
-    fraudDNAs.reduce((sum, dna) => sum + dna.similarity, 0) / Math.max(fraudDNAs.length, 1),
+    fraudDnaRows.reduce((sum, dna) => sum + dna.similarity, 0) / Math.max(fraudDnaRows.length, 1),
   );
 
-  const riskTrend = transactions
-    .slice()
-    .reverse()
-    .slice(0, 10)
-    .map((transaction, index) => ({
-      label: `A${index + 1}`,
-      value: transaction.riskScore,
-    }));
+  const riskTrend = useMemo(
+    () =>
+      transactionRows
+        .slice(0, 10)
+        .reverse()
+        .map((transaction, index) => ({
+          label: `A${index + 1}`,
+          value: transaction.risk_score,
+        })),
+    [transactionRows],
+  );
+
+  const title = dashboardSummary?.title || "Analyst Dashboard";
+  const summary =
+    dashboardSummary?.summary ||
+    "Investigation-first console for fraud detection, triage, and evidence linking";
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Analyst Dashboard</h1>
+          <h1 className="text-2xl font-bold tracking-tight">{title}</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Investigation-first console for fraud detection, triage, and evidence linking
+            {summary}
           </p>
+          {syncMessage ? <p className="text-[11px] text-muted-foreground mt-1.5">{syncMessage}</p> : null}
         </div>
-        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-warning/10 text-warning text-xs font-semibold">
-          <Target className="w-3.5 h-3.5" />
-          Active Investigation Mode
+        <div className="flex items-center gap-2">
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-warning/10 text-warning text-xs font-semibold">
+            <Target className="w-3.5 h-3.5" />
+            Active Investigation Mode
+          </div>
+          <button
+            onClick={() => void syncAnalystData()}
+            disabled={syncLoading}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-secondary px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground disabled:cursor-not-allowed"
+          >
+            <RotateCcw className={`w-3.5 h-3.5 ${syncLoading ? "animate-spin" : ""}`} />
+            {syncLoading ? "Syncing" : "Sync MongoDB"}
+          </button>
         </div>
       </div>
 
@@ -124,7 +207,7 @@ export default function AnalystDashboard() {
           badges={[
             "Role: ANALYST",
             "Scope: CASE TRIAGE",
-            "Pipeline: LIVE FEED",
+            `Signals: ${activeAlerts} Alerts`,
           ]}
         />
       </SectionReveal>
@@ -160,7 +243,7 @@ export default function AnalystDashboard() {
         <div className="glass rounded-xl p-5 border border-border/70">
           <h3 className="text-sm font-semibold mb-3">Priority Alert Queue</h3>
           <div className="space-y-2">
-            {alerts.slice(0, 5).map((alert) => (
+            {alertRows.slice(0, 5).map((alert) => (
               <div
                 key={alert.id}
                 className="flex items-center justify-between rounded-lg bg-secondary/40 px-3 py-2"
@@ -182,6 +265,9 @@ export default function AnalystDashboard() {
                 </span>
               </div>
             ))}
+            {!alertRows.length ? (
+              <p className="text-xs text-muted-foreground">No active alerts available from backend.</p>
+            ) : null}
           </div>
         </div>
       </SectionReveal>

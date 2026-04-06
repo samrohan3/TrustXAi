@@ -13,7 +13,6 @@ import SectionReveal from "@/components/shared/SectionReveal";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
 import { useAuth } from "@/contexts/AuthContext";
-import { modelUpdates, institutions } from "@/data/mockData";
 import {
   fetchFederatedSnapshot,
   fetchMlTrainingRuns,
@@ -28,46 +27,6 @@ const statusIcon: Record<string, JSX.Element> = {
   rejected: <XCircle className="w-4 h-4 text-destructive" />,
 };
 
-const accuracyData = [
-  { institution: "HDFC", accuracy: 97.8, prevAccuracy: 96.6 },
-  { institution: "SBI", accuracy: 96.4, prevAccuracy: 95.6 },
-  { institution: "Axis", accuracy: 95.9, prevAccuracy: 95.4 },
-  { institution: "ICICI", accuracy: 97.1, prevAccuracy: 95.6 },
-  { institution: "PNB", accuracy: 93.2, prevAccuracy: 93.5 },
-];
-
-const convergenceData = Array.from({ length: 20 }, (_, i) => ({
-  round: i + 1,
-  globalLoss: +(2.4 * Math.exp(-0.18 * i) + 0.08 + Math.random() * 0.05).toFixed(3),
-  accuracy: +(100 - 14 * Math.exp(-0.22 * i) - Math.random() * 0.5).toFixed(1),
-}));
-
-const privacyMetrics = [
-  { metric: "ε-Budget Used", value: 72, max: 100, color: "bg-warning" },
-  { metric: "Noise Multiplier", value: 45, max: 100, color: "bg-accent" },
-  { metric: "Gradient Clipping", value: 88, max: 100, color: "bg-success" },
-  { metric: "Secure Aggregation", value: 100, max: 100, color: "bg-primary" },
-  { metric: "Data Isolation", value: 100, max: 100, color: "bg-success" },
-];
-
-const nodeHealth = institutions.map((inst) => ({
-  name: inst.name,
-  cpu: Math.floor(30 + Math.random() * 50),
-  memory: Math.floor(40 + Math.random() * 40),
-  gpu: Math.floor(20 + Math.random() * 60),
-  latency: Math.floor(12 + Math.random() * 80),
-  status: inst.status,
-}));
-
-const radarData = [
-  { subject: "Precision", HDFC: 97, SBI: 95, Axis: 94, fullMark: 100 },
-  { subject: "Recall", HDFC: 96, SBI: 94, Axis: 93, fullMark: 100 },
-  { subject: "F1-Score", HDFC: 96.5, SBI: 94.5, Axis: 93.5, fullMark: 100 },
-  { subject: "AUC-ROC", HDFC: 98, SBI: 97, Axis: 95, fullMark: 100 },
-  { subject: "Specificity", HDFC: 99, SBI: 98, Axis: 97, fullMark: 100 },
-  { subject: "Speed", HDFC: 92, SBI: 88, Axis: 90, fullMark: 100 },
-];
-
 const privacyToneClass: Record<string, string> = {
   warning: "bg-warning",
   accent: "bg-accent",
@@ -81,11 +40,6 @@ const titleMetric = (value: string) =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
 
-const asNumber = (value: unknown, fallback = 0): number => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-};
-
 export default function FederatedLearning() {
   const { authToken } = useAuth();
   const [isTraining, setIsTraining] = useState(false);
@@ -95,15 +49,39 @@ export default function FederatedLearning() {
   const [backendStatus, setBackendStatus] = useState<string | null>(null);
   const [latestTrainingRun, setLatestTrainingRun] = useState<MlTrainingRun | null>(null);
 
-  const [liveModelUpdates, setLiveModelUpdates] = useState(modelUpdates);
-  const [liveConvergenceData, setLiveConvergenceData] = useState(convergenceData);
-  const [livePrivacyMetrics, setLivePrivacyMetrics] = useState(privacyMetrics);
-  const [liveNodeHealth, setLiveNodeHealth] = useState(nodeHealth);
+  const [liveModelUpdates, setLiveModelUpdates] = useState<Array<{
+    id: string;
+    institution: string;
+    version: string;
+    accuracy: number;
+    timestamp: string;
+    status: "merged" | "validating" | "rejected";
+    improvement: number;
+  }>>([]);
+  const [liveConvergenceData, setLiveConvergenceData] = useState<Array<{
+    round: number;
+    globalLoss: number;
+    accuracy: number;
+  }>>([]);
+  const [livePrivacyMetrics, setLivePrivacyMetrics] = useState<Array<{
+    metric: string;
+    value: number;
+    max: number;
+    color: string;
+  }>>([]);
+  const [liveNodeHealth, setLiveNodeHealth] = useState<Array<{
+    name: string;
+    cpu: number;
+    memory: number;
+    gpu: number;
+    latency: number;
+    status: string;
+  }>>([]);
 
-  const effectiveModelUpdates = liveModelUpdates.length ? liveModelUpdates : modelUpdates;
-  const effectiveConvergenceData = liveConvergenceData.length ? liveConvergenceData : convergenceData;
-  const effectivePrivacyMetrics = livePrivacyMetrics.length ? livePrivacyMetrics : privacyMetrics;
-  const effectiveNodeHealth = liveNodeHealth.length ? liveNodeHealth : nodeHealth;
+  const effectiveModelUpdates = liveModelUpdates;
+  const effectiveConvergenceData = liveConvergenceData;
+  const effectivePrivacyMetrics = livePrivacyMetrics;
+  const effectiveNodeHealth = liveNodeHealth;
 
   const totalRounds = Math.max(effectiveConvergenceData.length, 1);
 
@@ -127,26 +105,73 @@ export default function FederatedLearning() {
     }));
   }, [effectiveModelUpdates]);
 
-  const displayedAccuracyData = dynamicAccuracyData.length ? dynamicAccuracyData : accuracyData;
+  const displayedAccuracyData = dynamicAccuracyData;
 
-  const currentConvergence =
-    effectiveConvergenceData[Math.max(0, Math.min(currentRound - 1, effectiveConvergenceData.length - 1))] ??
-    effectiveConvergenceData[0];
+  const currentConvergence = effectiveConvergenceData.length
+    ? effectiveConvergenceData[Math.max(0, Math.min(currentRound - 1, effectiveConvergenceData.length - 1))]
+    : { round: 0, globalLoss: 0, accuracy: 0 };
   const privacyStrength = Math.round(
     effectivePrivacyMetrics.reduce((sum, metric) => sum + metric.value, 0) /
       Math.max(effectivePrivacyMetrics.length, 1),
   );
   const onlineNodeCount = effectiveNodeHealth.filter((inst) => inst.status === "active").length;
 
-  const federationTrend = effectiveConvergenceData
-    .slice(0, Math.max(currentRound, 8))
-    .map((entry) => ({
-      label: `R${entry.round}`,
-      value: entry.accuracy,
-    }));
+  const federationTrend = effectiveConvergenceData.length
+    ? effectiveConvergenceData
+      .slice(0, Math.max(currentRound, 8))
+      .map((entry) => ({
+        label: `R${entry.round}`,
+        value: entry.accuracy,
+      }))
+    : [{ label: "R0", value: 0 }];
+
+  const qualityRadarData = useMemo(() => {
+    const avgAccuracy = displayedAccuracyData.length
+      ? displayedAccuracyData.reduce((sum, row) => sum + row.accuracy, 0) / displayedAccuracyData.length
+      : 0;
+    const avgImprovement = effectiveModelUpdates.length
+      ? effectiveModelUpdates.reduce((sum, row) => sum + row.improvement, 0) / effectiveModelUpdates.length
+      : 0;
+    const onlinePct = effectiveNodeHealth.length
+      ? Math.round((onlineNodeCount / effectiveNodeHealth.length) * 100)
+      : 0;
+
+    return [
+      { subject: "Accuracy", score: Math.round(avgAccuracy), fullMark: 100 },
+      {
+        subject: "Improvement",
+        score: Math.max(0, Math.min(100, Math.round(50 + avgImprovement * 20))),
+        fullMark: 100,
+      },
+      { subject: "Privacy", score: privacyStrength, fullMark: 100 },
+      { subject: "Node Health", score: onlinePct, fullMark: 100 },
+      {
+        subject: "Stability",
+        score: Math.max(0, Math.min(100, Math.round(100 - currentConvergence.globalLoss * 60))),
+        fullMark: 100,
+      },
+      {
+        subject: "Convergence",
+        score: Math.max(0, Math.min(100, Math.round(100 - currentConvergence.globalLoss * 80))),
+        fullMark: 100,
+      },
+    ];
+  }, [
+    currentConvergence.globalLoss,
+    displayedAccuracyData,
+    effectiveModelUpdates,
+    effectiveNodeHealth.length,
+    onlineNodeCount,
+    privacyStrength,
+  ]);
 
   const syncBackendData = async () => {
     if (!authToken) {
+      setLiveModelUpdates([]);
+      setLiveConvergenceData([]);
+      setLivePrivacyMetrics([]);
+      setLiveNodeHealth([]);
+      setLatestTrainingRun(null);
       setBackendStatus("Sign in to sync live backend metrics.");
       return;
     }
@@ -255,11 +280,13 @@ export default function FederatedLearning() {
     }
     const id = setTimeout(() => {
       setCurrentRound((r) => r + 1);
+      const simulatedDuration = (1 + ((currentRound % 5) * 0.35) + effectiveNodeHealth.length * 0.02).toFixed(1);
+      const convergencePoint = effectiveConvergenceData[currentRound];
       const msgs = [
         `Round ${currentRound + 1}: Distributing model to ${effectiveNodeHealth.length} nodes...`,
-        `Round ${currentRound + 1}: Local training complete (${(Math.random() * 2 + 1).toFixed(1)}s avg)`,
+        `Round ${currentRound + 1}: Local training complete (${simulatedDuration}s avg)`,
         `Round ${currentRound + 1}: Aggregating gradients with SecAgg protocol`,
-        `Round ${currentRound + 1}: Global loss = ${effectiveConvergenceData[currentRound]?.globalLoss} | Acc = ${effectiveConvergenceData[currentRound]?.accuracy}%`,
+        `Round ${currentRound + 1}: Global loss = ${convergencePoint?.globalLoss ?? 0} | Acc = ${convergencePoint?.accuracy ?? 0}%`,
       ];
       setTrainingLog((p) => [...p, msgs[currentRound % msgs.length]]);
     }, 800);
@@ -319,7 +346,7 @@ export default function FederatedLearning() {
           metrics={[
             {
               label: "Current Round",
-              value: `${currentRound}/20`,
+              value: `${currentRound}/${totalRounds}`,
               hint: isTraining ? "training in progress" : "training idle",
               icon: BrainCircuit,
               tone: isTraining ? "primary" : "accent",
@@ -347,7 +374,7 @@ export default function FederatedLearning() {
             },
             {
               label: "Online Nodes",
-              value: `${onlineNodeCount}/${effectiveNodeHealth.length || institutions.length}`,
+              value: `${onlineNodeCount}/${effectiveNodeHealth.length}`,
               hint: "active participating institutions",
               icon: Server,
               tone: "accent",
@@ -466,7 +493,7 @@ export default function FederatedLearning() {
               },
               {
                 label: "Active Nodes",
-                value: `${onlineNodeCount}/${effectiveNodeHealth.length || institutions.length}`,
+                value: `${onlineNodeCount}/${effectiveNodeHealth.length}`,
                 icon: Server,
               },
               { label: "Privacy Budget", value: "ε = 3.2", icon: Lock },
@@ -505,6 +532,9 @@ export default function FederatedLearning() {
                     <Bar dataKey="accuracy" fill="hsl(48, 96%, 53%)" radius={[4, 4, 0, 0]} name="Current" />
                   </BarChart>
                 </ResponsiveContainer>
+                {!displayedAccuracyData.length ? (
+                  <p className="text-xs text-muted-foreground mt-3">No model-update accuracy rows were returned by the backend.</p>
+                ) : null}
               </div>
             </SectionReveal>
 
@@ -512,13 +542,18 @@ export default function FederatedLearning() {
               <div className="glass rounded-xl p-5">
                 <h3 className="text-sm font-semibold mb-4">Model Quality Radar</h3>
                 <ResponsiveContainer width="100%" height={240}>
-                  <RadarChart data={radarData}>
+                  <RadarChart data={qualityRadarData}>
                     <PolarGrid stroke="hsl(220, 16%, 14%)" />
                     <PolarAngleAxis dataKey="subject" stroke="hsl(220, 10%, 50%)" fontSize={10} />
-                    <PolarRadiusAxis domain={[80, 100]} stroke="hsl(220, 16%, 14%)" fontSize={9} />
-                    <Radar name="HDFC" dataKey="HDFC" stroke="hsl(48, 96%, 53%)" fill="hsl(48, 96%, 53%)" fillOpacity={0.15} strokeWidth={2} />
-                    <Radar name="SBI" dataKey="SBI" stroke="hsl(210, 100%, 60%)" fill="hsl(210, 100%, 60%)" fillOpacity={0.1} strokeWidth={2} />
-                    <Radar name="Axis" dataKey="Axis" stroke="hsl(142, 72%, 45%)" fill="hsl(142, 72%, 45%)" fillOpacity={0.1} strokeWidth={2} />
+                    <PolarRadiusAxis domain={[0, 100]} stroke="hsl(220, 16%, 14%)" fontSize={9} />
+                    <Radar
+                      name="Federation"
+                      dataKey="score"
+                      stroke="hsl(48, 96%, 53%)"
+                      fill="hsl(48, 96%, 53%)"
+                      fillOpacity={0.15}
+                      strokeWidth={2}
+                    />
                     <Tooltip contentStyle={{ background: "hsl(220, 18%, 8%)", border: "1px solid hsl(220, 16%, 14%)", borderRadius: 8, fontSize: 12 }} />
                   </RadarChart>
                 </ResponsiveContainer>
@@ -619,6 +654,9 @@ export default function FederatedLearning() {
                       </div>
                     </div>
                   ))}
+                  {!effectivePrivacyMetrics.length ? (
+                    <p className="text-xs text-muted-foreground">No privacy-metric rows were returned by the backend.</p>
+                  ) : null}
                 </div>
               </div>
             </SectionReveal>
@@ -709,6 +747,13 @@ export default function FederatedLearning() {
                         </td>
                       </motion.tr>
                     ))}
+                    {!effectiveNodeHealth.length ? (
+                      <tr>
+                        <td className="px-4 py-3 text-xs text-muted-foreground" colSpan={6}>
+                          No node-health rows were returned by the backend.
+                        </td>
+                      </tr>
+                    ) : null}
                   </tbody>
                 </table>
               </div>
@@ -743,6 +788,9 @@ export default function FederatedLearning() {
                 </div>
               </motion.div>
             ))}
+            {!effectiveModelUpdates.length ? (
+              <p className="text-xs text-muted-foreground">No model-update rows were returned by the backend.</p>
+            ) : null}
           </div>
         </div>
       </SectionReveal>

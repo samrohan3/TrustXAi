@@ -1,21 +1,28 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ShieldAlert, TrendingDown, Activity, Zap, AlertTriangle, Radio, Pause, Play,
   type LucideIcon,
 } from "lucide-react";
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, AreaChart, Area,
 } from "recharts";
 import { motion, AnimatePresence } from "framer-motion";
 import SectionReveal from "@/components/shared/SectionReveal";
 import FraudHeatmap from "@/components/dashboard/FraudHeatmap";
-import { transactions, alerts, fraudTrendData, riskDistribution } from "@/data/mockData";
+import { useAuth } from "@/contexts/AuthContext";
 import { useAnimatedCounter } from "@/hooks/useAnimatedCounter";
-import { useLiveTransactions } from "@/hooks/useLiveTransactions";
 import AnomalyPulse from "@/components/dashboard/AnomalyPulse";
 import ThreatPredictor from "@/components/dashboard/ThreatPredictor";
 import VisualMetricStrip from "@/components/shared/VisualMetricStrip";
+import {
+  fetchAllTransactions,
+  fetchDashboardOverview,
+  fetchFraudAlerts,
+  type BackendAlert,
+  type BackendDashboardSummary,
+  type BackendTransaction,
+} from "@/lib/backendApi";
 
 const riskColor = (score: number) =>
   score >= 80 ? "text-destructive" : score >= 50 ? "text-warning" : "text-success";
@@ -36,6 +43,44 @@ const severityColor: Record<string, string> = {
   medium: "border-l-accent bg-accent/5",
   low: "border-l-muted-foreground bg-muted/50",
 };
+
+interface DashboardTransaction {
+  id: string;
+  from: string;
+  to: string;
+  amount: number;
+  riskScore: number;
+  status: string;
+  type: string;
+  timestamp: string;
+}
+
+interface DashboardAlert {
+  id: string;
+  title: string;
+  description: string;
+  severity: string;
+  transactionId: string;
+}
+
+const mapDashboardTransaction = (row: BackendTransaction): DashboardTransaction => ({
+  id: row.id,
+  from: row.from_account,
+  to: row.to_account,
+  amount: row.amount,
+  riskScore: row.risk_score,
+  status: row.status,
+  type: row.type,
+  timestamp: row.timestamp,
+});
+
+const mapDashboardAlert = (row: BackendAlert): DashboardAlert => ({
+  id: row.id,
+  title: row.title,
+  description: row.description,
+  severity: row.severity,
+  transactionId: row.transaction_id,
+});
 
 function AnimatedStat({ icon: Icon, label, targetValue, displayValue, change, changeType = "neutral", delay = 0 }: {
   icon: LucideIcon; label: string; targetValue: number; displayValue: (v: number) => string; change: string; changeType?: string; delay?: number;
@@ -63,7 +108,91 @@ function AnimatedStat({ icon: Icon, label, targetValue, displayValue, change, ch
 }
 
 export default function Dashboard() {
-  const { liveTxs, isLive, toggleLive } = useLiveTransactions(transactions, 3500);
+  const { authToken } = useAuth();
+  const [transactionRows, setTransactionRows] = useState<BackendTransaction[]>([]);
+  const [alertRows, setAlertRows] = useState<BackendAlert[]>([]);
+  const [dashboardSummary, setDashboardSummary] = useState<BackendDashboardSummary | null>(null);
+  const [isLive, setIsLive] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+
+  const syncDashboardData = useCallback(async (background = false) => {
+    if (!authToken) {
+      if (!background) {
+        setTransactionRows([]);
+        setAlertRows([]);
+        setDashboardSummary(null);
+        setSyncMessage("Backend auth token unavailable. Sign in to load live dashboard telemetry.");
+      }
+      return;
+    }
+
+    if (!background) {
+      setIsSyncing(true);
+      setSyncMessage("Syncing dashboard telemetry from backend...");
+    }
+
+    try {
+      const [summary, transactions, alerts] = await Promise.all([
+        fetchDashboardOverview(),
+        fetchAllTransactions({ sortBy: "timestamp", sortDir: "desc", maxRecords: 20000 }),
+        fetchFraudAlerts(),
+      ]);
+
+      setDashboardSummary(summary);
+      setTransactionRows(transactions);
+      setAlertRows(alerts);
+      if (!background) {
+        setSyncMessage(
+          `Loaded ${transactions.length.toLocaleString()} transactions and ${alerts.length} alerts from backend.`,
+        );
+      }
+    } catch (error) {
+      if (!background) {
+        const detail = error instanceof Error ? error.message : "Failed to sync dashboard telemetry.";
+        setTransactionRows([]);
+        setAlertRows([]);
+        setDashboardSummary(null);
+        setSyncMessage(detail);
+      }
+    } finally {
+      if (!background) {
+        setIsSyncing(false);
+      }
+    }
+  }, [authToken]);
+
+  useEffect(() => {
+    void syncDashboardData();
+  }, [syncDashboardData]);
+
+  useEffect(() => {
+    if (!isLive || !authToken) return;
+    const id = setInterval(() => {
+      void syncDashboardData(true);
+    }, 10000);
+    return () => clearInterval(id);
+  }, [authToken, isLive, syncDashboardData]);
+
+  const toggleLive = () => setIsLive((previous) => !previous);
+
+  const mappedTransactions = useMemo(
+    () => transactionRows.map(mapDashboardTransaction),
+    [transactionRows],
+  );
+
+  const mappedAlerts = useMemo(
+    () => alertRows.map(mapDashboardAlert),
+    [alertRows],
+  );
+
+  const liveTxs = mappedTransactions.slice(0, 15);
+  const liveAlerts = mappedAlerts;
+
+  const dashboardTitle = dashboardSummary?.title || "Operations Dashboard";
+  const dashboardSubtitle =
+    dashboardSummary?.summary ||
+    "Real-time investigation and fraud intelligence workspace";
 
   const liveRiskAverage = Math.round(
     liveTxs.reduce((total, tx) => total + tx.riskScore, 0) / Math.max(liveTxs.length, 1),
@@ -79,6 +208,68 @@ export default function Dashboard() {
     value: tx.riskScore,
   }));
 
+  const blockedCountAll = mappedTransactions.filter((tx) => tx.status === "blocked").length;
+  const blockedVolumeAll = mappedTransactions
+    .filter((tx) => tx.status === "blocked")
+    .reduce((sum, tx) => sum + tx.amount, 0);
+  const blockedVolumeCrX10 = Math.round((blockedVolumeAll / 10_000_000) * 10);
+  const indexedTransactions = mappedTransactions.length;
+  const avgRiskAll = Math.round(
+    mappedTransactions.reduce((sum, tx) => sum + tx.riskScore, 0) / Math.max(mappedTransactions.length, 1),
+  );
+
+  const fraudTrendData = useMemo(() => {
+    const grouped = new Map<string, { detected: number; blocked: number }>();
+
+    const sorted = mappedTransactions
+      .slice()
+      .sort((left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime());
+
+    for (const tx of sorted) {
+      const date = new Date(tx.timestamp).toLocaleDateString("en-US", {
+        month: "short",
+        day: "2-digit",
+      });
+      const current = grouped.get(date) ?? { detected: 0, blocked: 0 };
+      if (tx.riskScore >= 50) {
+        current.detected += 1;
+      }
+      if (tx.status === "blocked") {
+        current.blocked += 1;
+      }
+      grouped.set(date, current);
+    }
+
+    const rows = Array.from(grouped.entries()).map(([date, values]) => ({
+      date,
+      detected: values.detected,
+      blocked: values.blocked,
+    }));
+
+    return rows.slice(-10);
+  }, [mappedTransactions]);
+
+  const riskDistribution = useMemo(() => {
+    const counts = {
+      low: mappedTransactions.filter((tx) => tx.riskScore <= 30).length,
+      medium: mappedTransactions.filter((tx) => tx.riskScore > 30 && tx.riskScore <= 60).length,
+      high: mappedTransactions.filter((tx) => tx.riskScore > 60 && tx.riskScore <= 80).length,
+      critical: mappedTransactions.filter((tx) => tx.riskScore > 80).length,
+    };
+
+    const total = Math.max(mappedTransactions.length, 1);
+    return [
+      { name: "Low (0-30)", value: Math.round((counts.low / total) * 100), fill: "hsl(142, 72%, 45%)" },
+      { name: "Medium (31-60)", value: Math.round((counts.medium / total) * 100), fill: "hsl(38, 92%, 50%)" },
+      { name: "High (61-80)", value: Math.round((counts.high / total) * 100), fill: "hsl(25, 95%, 53%)" },
+      { name: "Critical (81-100)", value: Math.round((counts.critical / total) * 100), fill: "hsl(0, 72%, 51%)" },
+    ];
+  }, [mappedTransactions]);
+
+  const chartFraudTrendData = fraudTrendData.length
+    ? fraudTrendData
+    : [{ date: "-", detected: 0, blocked: 0 }];
+
   // Animated alert count
   const [alertPulse, setAlertPulse] = useState(false);
   useEffect(() => {
@@ -90,12 +281,20 @@ export default function Dashboard() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Analyst Dashboard</h1>
-          <p className="text-sm text-muted-foreground mt-1">Real-time investigation and fraud intelligence workspace</p>
+          <h1 className="text-2xl font-bold tracking-tight">{dashboardTitle}</h1>
+          <p className="text-sm text-muted-foreground mt-1">{dashboardSubtitle}</p>
+          {syncMessage ? <p className="text-[11px] text-muted-foreground mt-1.5">{syncMessage}</p> : null}
         </div>
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full ${isLive ? "bg-success animate-pulse" : "bg-muted-foreground"}`} />
           <span className="text-xs font-mono text-muted-foreground">{isLive ? "LIVE" : "PAUSED"}</span>
+          <button
+            onClick={() => void syncDashboardData()}
+            disabled={isSyncing}
+            className="ml-1 px-3 py-1.5 rounded-lg bg-secondary text-xs font-medium hover:bg-secondary/80 transition-colors disabled:cursor-not-allowed"
+          >
+            {isSyncing ? "Syncing" : "Sync MongoDB"}
+          </button>
         </div>
       </div>
 
@@ -141,18 +340,50 @@ export default function Dashboard() {
           chartColor="hsl(210, 100%, 60%)"
           badges={[
             isLive ? "Stream Status: LIVE" : "Stream Status: PAUSED",
-            `Alerts Open: ${alerts.length}`,
-            "Model v3.2.1",
+            `Alerts Open: ${liveAlerts.length}`,
+            `Records: ${mappedTransactions.length.toLocaleString()}`,
           ]}
         />
       </SectionReveal>
 
       {/* Animated Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <AnimatedStat icon={ShieldAlert} label="Threats Blocked" targetValue={311} displayValue={(v) => v.toLocaleString()} change="+23 today" changeType="positive" delay={0} />
-        <AnimatedStat icon={TrendingDown} label="Loss Prevented" targetValue={42} displayValue={(v) => `₹${v / 10}Cr`} change="+18% vs last week" changeType="positive" delay={0.08} />
-        <AnimatedStat icon={Activity} label="Active Monitors" targetValue={1847} displayValue={(v) => v.toLocaleString()} change="All systems nominal" changeType="neutral" delay={0.16} />
-        <AnimatedStat icon={Zap} label="Avg Response" targetValue={187} displayValue={(v) => `${v}ms`} change="-12ms improvement" changeType="positive" delay={0.24} />
+        <AnimatedStat
+          icon={ShieldAlert}
+          label="Threats Blocked"
+          targetValue={blockedCountAll}
+          displayValue={(v) => v.toLocaleString()}
+          change={`${liveAlerts.filter((alert) => alert.severity === "critical").length} critical alerts`}
+          changeType="positive"
+          delay={0}
+        />
+        <AnimatedStat
+          icon={TrendingDown}
+          label="Blocked Volume"
+          targetValue={blockedVolumeCrX10}
+          displayValue={(v) => `₹${(v / 10).toFixed(1)}Cr`}
+          change="backend ledger aggregate"
+          changeType="positive"
+          delay={0.08}
+        />
+        <AnimatedStat
+          icon={Activity}
+          label="Transactions Indexed"
+          targetValue={indexedTransactions}
+          displayValue={(v) => v.toLocaleString()}
+          change="live backend snapshot"
+          changeType="neutral"
+          delay={0.16}
+        />
+        <AnimatedStat
+          icon={Zap}
+          label="Average Risk"
+          targetValue={avgRiskAll}
+          displayValue={(v) => `${v}`}
+          change="global risk baseline"
+          changeType={avgRiskAll >= 60 ? "negative" : "positive"}
+          delay={0.24}
+        />
       </div>
 
       {/* Charts row */}
@@ -161,7 +392,7 @@ export default function Dashboard() {
           <div className="glass rounded-xl p-5">
             <h3 className="text-sm font-semibold mb-4">Fraud Detection Trend</h3>
             <ResponsiveContainer width="100%" height={260}>
-              <AreaChart data={fraudTrendData}>
+              <AreaChart data={chartFraudTrendData}>
                 <defs>
                   <linearGradient id="gradDetected" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="hsl(48, 96%, 53%)" stopOpacity={0.3} />
@@ -266,6 +497,9 @@ export default function Dashboard() {
                   </motion.div>
                 ))}
               </AnimatePresence>
+              {!liveTxs.length ? (
+                <p className="text-xs text-muted-foreground">No transaction feed rows were returned by the backend.</p>
+              ) : null}
             </div>
           </div>
         </SectionReveal>
@@ -282,11 +516,11 @@ export default function Dashboard() {
                 animate={alertPulse ? { scale: [1, 1.2, 1] } : {}}
                 className="text-[10px] px-2 py-0.5 rounded-full bg-destructive/10 text-destructive font-mono font-bold"
               >
-                {alerts.length}
+                {liveAlerts.length}
               </motion.span>
             </div>
             <div className="space-y-2 max-h-[360px] overflow-y-auto">
-              {alerts.map((alert, i) => (
+              {liveAlerts.map((alert, i) => (
                 <motion.div
                   key={alert.id}
                   initial={{ opacity: 0, y: 8 }}
@@ -302,6 +536,9 @@ export default function Dashboard() {
                   <p className="text-[10px] text-muted-foreground font-mono mt-2">{alert.transactionId}</p>
                 </motion.div>
               ))}
+              {!liveAlerts.length ? (
+                <p className="text-xs text-muted-foreground">No alerts were returned by the backend.</p>
+              ) : null}
             </div>
           </div>
         </SectionReveal>

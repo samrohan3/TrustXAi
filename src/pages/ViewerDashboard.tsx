@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
@@ -8,10 +9,21 @@ import {
   CheckCircle2,
   Building2,
   Activity,
+  RotateCcw,
 } from "lucide-react";
 import SectionReveal from "@/components/shared/SectionReveal";
 import VisualMetricStrip from "@/components/shared/VisualMetricStrip";
-import { blockchainEntries, transactions } from "@/data/mockData";
+import { useAuth } from "@/contexts/AuthContext";
+import {
+  fetchAllTransactions,
+  fetchBlockchainEntries,
+  fetchBlockchainMetrics,
+  fetchViewerDashboardSummary,
+  type BackendBlockchainEntry,
+  type BackendBlockchainMetrics,
+  type BackendDashboardSummary,
+  type BackendTransaction,
+} from "@/lib/backendApi";
 
 const quickViews = [
   {
@@ -29,37 +41,112 @@ const quickViews = [
 ];
 
 export default function ViewerDashboard() {
-  const approvedTx = transactions.filter((transaction) => transaction.status === "approved").length;
-  const approvedRate = Math.round((approvedTx / Math.max(transactions.length, 1)) * 100);
-  const confirmedOnChain = blockchainEntries.filter((entry) => entry.status === "confirmed").length;
-  const chainRate = Math.round((confirmedOnChain / Math.max(blockchainEntries.length, 1)) * 100);
-  const trackedInstitutions = new Set(transactions.map((transaction) => transaction.institution)).size;
+  const { authToken } = useAuth();
+  const [transactionRows, setTransactionRows] = useState<BackendTransaction[]>([]);
+  const [blockchainRows, setBlockchainRows] = useState<BackendBlockchainEntry[]>([]);
+  const [blockchainMetrics, setBlockchainMetrics] = useState<BackendBlockchainMetrics | null>(null);
+  const [dashboardSummary, setDashboardSummary] = useState<BackendDashboardSummary | null>(null);
+  const [syncLoading, setSyncLoading] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+
+  const syncViewerData = useCallback(async () => {
+    if (!authToken) {
+      setTransactionRows([]);
+      setBlockchainRows([]);
+      setBlockchainMetrics(null);
+      setDashboardSummary(null);
+      setSyncMessage("Backend auth token unavailable. Sign in to load live viewer telemetry.");
+      return;
+    }
+
+    setSyncLoading(true);
+    setSyncMessage("Syncing viewer dashboard from backend...");
+
+    try {
+      const [summary, transactions, blockchainEntries, metrics] = await Promise.all([
+        fetchViewerDashboardSummary(),
+        fetchAllTransactions({ sortBy: "timestamp", sortDir: "desc", maxRecords: 20000 }),
+        fetchBlockchainEntries(),
+        fetchBlockchainMetrics(),
+      ]);
+
+      setDashboardSummary(summary);
+      setTransactionRows(transactions);
+      setBlockchainRows(blockchainEntries);
+      setBlockchainMetrics(metrics);
+      setSyncMessage(
+        `Loaded ${transactions.length.toLocaleString()} transactions and ${blockchainEntries.length} chain entries from backend.`,
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Failed to sync viewer dashboard.";
+      setDashboardSummary(null);
+      setTransactionRows([]);
+      setBlockchainRows([]);
+      setBlockchainMetrics(null);
+      setSyncMessage(detail);
+    } finally {
+      setSyncLoading(false);
+    }
+  }, [authToken]);
+
+  useEffect(() => {
+    void syncViewerData();
+  }, [syncViewerData]);
+
+  const approvedTx = transactionRows.filter((transaction) => transaction.status === "approved").length;
+  const approvedRate = Math.round((approvedTx / Math.max(transactionRows.length, 1)) * 100);
+  const confirmedOnChain =
+    blockchainMetrics?.confirmed_count ??
+    blockchainRows.filter((entry) => entry.status === "confirmed").length;
+  const chainRate =
+    blockchainMetrics?.confirmation_rate ??
+    Math.round((confirmedOnChain / Math.max(blockchainRows.length, 1)) * 100);
+  const trackedInstitutions = new Set(transactionRows.map((transaction) => transaction.institution)).size;
   const avgRisk = Math.round(
-    transactions.reduce((sum, transaction) => sum + transaction.riskScore, 0) /
-      Math.max(transactions.length, 1),
+    transactionRows.reduce((sum, transaction) => sum + transaction.risk_score, 0) /
+      Math.max(transactionRows.length, 1),
   );
 
-  const confidenceTrend = transactions
-    .slice()
-    .reverse()
-    .slice(0, 10)
-    .map((transaction, index) => ({
-      label: `V${index + 1}`,
-      value: Math.max(0, 100 - transaction.riskScore),
-    }));
+  const confidenceTrend = useMemo(
+    () =>
+      transactionRows
+        .slice(0, 10)
+        .reverse()
+        .map((transaction, index) => ({
+          label: `V${index + 1}`,
+          value: Math.max(0, 100 - transaction.risk_score),
+        })),
+    [transactionRows],
+  );
+
+  const title = dashboardSummary?.title || "Viewer Dashboard";
+  const summary =
+    dashboardSummary?.summary ||
+    "Read-only operational snapshot for cross-bank fraud monitoring";
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Viewer Dashboard</h1>
+          <h1 className="text-2xl font-bold tracking-tight">{title}</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Read-only operational snapshot for cross-bank fraud monitoring
+            {summary}
           </p>
+          {syncMessage ? <p className="text-[11px] text-muted-foreground mt-1.5">{syncMessage}</p> : null}
         </div>
-        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-accent/10 text-accent text-xs font-semibold">
-          <Eye className="w-3.5 h-3.5" />
-          Read-Only Mode
+        <div className="flex items-center gap-2">
+          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-accent/10 text-accent text-xs font-semibold">
+            <Eye className="w-3.5 h-3.5" />
+            Read-Only Mode
+          </div>
+          <button
+            onClick={() => void syncViewerData()}
+            disabled={syncLoading}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-secondary px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground disabled:cursor-not-allowed"
+          >
+            <RotateCcw className={`w-3.5 h-3.5 ${syncLoading ? "animate-spin" : ""}`} />
+            {syncLoading ? "Syncing" : "Sync MongoDB"}
+          </button>
         </div>
       </div>
 
@@ -105,7 +192,7 @@ export default function ViewerDashboard() {
           badges={[
             "Access: VIEW ONLY",
             "Data: LIVE SNAPSHOT",
-            "Export: RESTRICTED",
+            `Chain Confirmed: ${confirmedOnChain}`,
           ]}
         />
       </SectionReveal>
@@ -141,21 +228,24 @@ export default function ViewerDashboard() {
         <div className="glass rounded-xl p-5 border border-border/70">
           <h3 className="text-sm font-semibold mb-3">Latest Read-Only Highlights</h3>
           <div className="space-y-2">
-            {transactions.slice(0, 4).map((transaction) => (
+            {transactionRows.slice(0, 4).map((transaction) => (
               <div
                 key={transaction.id}
                 className="flex items-center justify-between rounded-lg bg-secondary/40 px-3 py-2"
               >
                 <div>
                   <p className="text-xs font-medium">{transaction.id}</p>
-                  <p className="text-[11px] text-muted-foreground">{transaction.from} to {transaction.to}</p>
+                  <p className="text-[11px] text-muted-foreground">{transaction.from_account} to {transaction.to_account}</p>
                 </div>
                 <div className="text-right">
                   <p className="text-xs font-semibold">Rs {transaction.amount.toLocaleString()}</p>
-                  <p className="text-[11px] text-muted-foreground">Risk {transaction.riskScore}</p>
+                  <p className="text-[11px] text-muted-foreground">Risk {transaction.risk_score}</p>
                 </div>
               </div>
             ))}
+            {!transactionRows.length ? (
+              <p className="text-xs text-muted-foreground">No transaction highlights available from backend.</p>
+            ) : null}
           </div>
         </div>
       </SectionReveal>

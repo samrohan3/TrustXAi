@@ -8,7 +8,6 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import SectionReveal from "@/components/shared/SectionReveal";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
-import { institutions as fallbackInstitutions } from "@/data/mockData";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   fetchAdminAuditLogs,
@@ -28,42 +27,45 @@ const trustColor = (score: number) => {
   return "text-warning";
 };
 
-const fallbackAuditLogs = [
-  { id: 1, user: "admin@rbi.gov.in", action: "Modified RLS policy", target: "fraud_reports", timestamp: "2024-03-15T14:23:00Z", severity: "high" },
-  { id: 2, user: "analyst@sbi.co.in", action: "Exported transaction data", target: "transactions", timestamp: "2024-03-15T14:18:00Z", severity: "medium" },
-  { id: 3, user: "admin@rbi.gov.in", action: "Added new institution node", target: "Federal Bank", timestamp: "2024-03-15T13:45:00Z", severity: "low" },
-  { id: 4, user: "system", action: "Automated model retrain triggered", target: "FedAvg v3.2.1", timestamp: "2024-03-15T12:00:00Z", severity: "low" },
-  { id: 5, user: "admin@rbi.gov.in", action: "Revoked API key", target: "tc_live_old_key", timestamp: "2024-03-15T10:30:00Z", severity: "high" },
-  { id: 6, user: "viewer@hdfc.com", action: "Accessed fraud intelligence", target: "Dashboard", timestamp: "2024-03-15T09:15:00Z", severity: "low" },
-  { id: 7, user: "system", action: "Blockchain sync completed", target: "Block #18847291", timestamp: "2024-03-15T08:00:00Z", severity: "low" },
-  { id: 8, user: "analyst@sbi.co.in", action: "Flagged suspicious transaction", target: "TXN-8302", timestamp: "2024-03-14T22:30:00Z", severity: "high" },
-];
-
 const severityBadge: Record<string, string> = {
   high: "bg-destructive/10 text-destructive",
   medium: "bg-warning/10 text-warning",
   low: "bg-muted text-muted-foreground",
 };
 
-const fallbackRoleDistribution = [
-  { name: "Admin", value: 3, fill: "hsl(48, 96%, 53%)" },
-  { name: "Analyst", value: 12, fill: "hsl(210, 100%, 60%)" },
-  { name: "Viewer", value: 28, fill: "hsl(142, 72%, 45%)" },
-  { name: "Auditor", value: 5, fill: "hsl(38, 92%, 50%)" },
-];
+interface InstitutionRow {
+  id: string;
+  name: string;
+  type: string;
+  trustScore: number;
+  status: "active" | "suspended" | "pending";
+  nodesCount: number;
+  lastSync: string;
+}
 
-const fallbackThreatFeed = [
-  { id: 1, type: "Phishing Campaign", source: "CERT-In", severity: "critical", time: "2m ago", desc: "New phishing kit targeting UPI payment flows" },
-  { id: 2, type: "Ransomware Alert", source: "FS-ISAC", severity: "high", time: "15m ago", desc: "LockBit variant targeting banking SWIFT endpoints" },
-  { id: 3, type: "Data Breach", source: "DarkWeb Monitor", severity: "high", time: "1h ago", desc: "Credential dump containing 50K Indian bank accounts" },
-  { id: 4, type: "Zero-Day Exploit", source: "NVD", severity: "critical", time: "3h ago", desc: "CVE-2024-XXXX: RCE in common banking middleware" },
-  { id: 5, type: "Bot Network", source: "Honeypot", severity: "medium", time: "5h ago", desc: "Automated account creation attempts detected" },
-];
+interface AuditLogRow {
+  id: number;
+  user: string;
+  action: string;
+  target: string;
+  timestamp: string;
+  severity: string;
+}
 
-type InstitutionRow = (typeof fallbackInstitutions)[number];
-type AuditLogRow = (typeof fallbackAuditLogs)[number];
-type ThreatFeedRow = (typeof fallbackThreatFeed)[number];
-type RoleDistributionRow = (typeof fallbackRoleDistribution)[number];
+interface ThreatFeedRow {
+  id: number;
+  type: string;
+  source: string;
+  severity: string;
+  time: string;
+  desc: string;
+}
+
+interface RoleDistributionRow {
+  name: string;
+  value: number;
+  fill: string;
+}
 
 const roleFillByName: Record<string, string> = {
   Admin: "hsl(48, 96%, 53%)",
@@ -144,11 +146,11 @@ export default function Admin() {
 
   const syncAdminData = useCallback(async () => {
     if (!authToken) {
-      setInstitutionsRows(null);
-      setAuditRows(null);
-      setThreatRows(null);
-      setRoleRows(null);
-      setAdminSyncMessage("Backend auth token unavailable. Showing local admin dataset.");
+      setInstitutionsRows([]);
+      setAuditRows([]);
+      setThreatRows([]);
+      setRoleRows([]);
+      setAdminSyncMessage("Backend auth token unavailable. Sign in to load admin telemetry.");
       return;
     }
 
@@ -171,18 +173,18 @@ export default function Admin() {
       setInstitutionsRows(mappedInstitutions);
       setAuditRows(mappedAuditLogs);
       setThreatRows(mappedThreatFeed);
-      setRoleRows(mappedRoleDistribution.length ? mappedRoleDistribution : null);
+      setRoleRows(mappedRoleDistribution);
 
       setAdminSyncMessage(
         `Loaded ${mappedInstitutions.length} institutions, ${mappedAuditLogs.length} audit events, and ${mappedThreatFeed.length} threat alerts from MongoDB.`,
       );
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Failed to load backend admin data.";
-      setInstitutionsRows(null);
-      setAuditRows(null);
-      setThreatRows(null);
-      setRoleRows(null);
-      setAdminSyncMessage(`${detail} Falling back to local admin dataset.`);
+      setInstitutionsRows([]);
+      setAuditRows([]);
+      setThreatRows([]);
+      setRoleRows([]);
+      setAdminSyncMessage(detail);
     } finally {
       setAdminSyncLoading(false);
     }
@@ -192,10 +194,10 @@ export default function Admin() {
     void syncAdminData();
   }, [syncAdminData]);
 
-  const institutions = institutionsRows ?? fallbackInstitutions;
-  const auditLogs = auditRows ?? fallbackAuditLogs;
-  const threatFeed = threatRows ?? fallbackThreatFeed;
-  const roleDistribution = roleRows ?? fallbackRoleDistribution;
+  const institutions = useMemo(() => institutionsRows ?? [], [institutionsRows]);
+  const auditLogs = useMemo(() => auditRows ?? [], [auditRows]);
+  const threatFeed = useMemo(() => threatRows ?? [], [threatRows]);
+  const roleDistribution = useMemo(() => roleRows ?? [], [roleRows]);
 
   const liveAlertCount = threatFeed.length;
   const activeInstitutionCount = institutions.filter((inst) => inst.status === "active").length;
@@ -278,7 +280,7 @@ export default function Admin() {
           <p className="text-sm text-muted-foreground mt-1">Manage institutional nodes, users, and access control</p>
           {adminSyncMessage ? (
             <p className="text-[11px] text-muted-foreground mt-1.5">
-              Data Source: {institutionsRows ? "MongoDB" : "Local Fallback"} • {adminSyncMessage}
+              {adminSyncMessage}
             </p>
           ) : null}
         </div>
@@ -439,20 +441,24 @@ export default function Admin() {
                       className="mt-3 pt-3 border-t border-border space-y-2"
                     >
                       <div className="flex justify-between text-xs">
-                        <span className="text-muted-foreground">API Calls (24h)</span>
-                        <span className="font-mono">{(Math.floor(Math.random() * 50000) + 10000).toLocaleString()}</span>
+                        <span className="text-muted-foreground">Status</span>
+                        <span className="font-mono">{inst.status}</span>
                       </div>
                       <div className="flex justify-between text-xs">
-                        <span className="text-muted-foreground">Fraud Reports</span>
-                        <span className="font-mono">{Math.floor(Math.random() * 200) + 50}</span>
+                        <span className="text-muted-foreground">Trust Tier</span>
+                        <span className="font-mono">
+                          {inst.trustScore >= 95 ? "Tier A" : inst.trustScore >= 90 ? "Tier B" : "Tier C"}
+                        </span>
                       </div>
                       <div className="flex justify-between text-xs">
-                        <span className="text-muted-foreground">Model Version</span>
-                        <span className="font-mono text-primary">v3.2.1</span>
+                        <span className="text-muted-foreground">Last Full Sync</span>
+                        <span className="font-mono text-primary">{new Date(inst.lastSync).toLocaleString()}</span>
                       </div>
                       <div className="flex justify-between text-xs">
-                        <span className="text-muted-foreground">Compliance</span>
-                        <span className="font-mono text-success">RBI DPSS Compliant</span>
+                        <span className="text-muted-foreground">Governance Role</span>
+                        <span className="font-mono text-success">
+                          {inst.type === "Regulator" ? "Policy Authority" : "Participating Institution"}
+                        </span>
                       </div>
                     </motion.div>
                   )}
@@ -460,6 +466,11 @@ export default function Admin() {
               </motion.div>
             ))}
           </div>
+          {!institutions.length ? (
+            <div className="rounded-lg border border-border bg-secondary/30 px-4 py-3 text-xs text-muted-foreground">
+              No institution records were returned by the backend.
+            </div>
+          ) : null}
 
           {/* Smart Contract Permissions */}
           <SectionReveal delay={0.15}>
@@ -532,6 +543,9 @@ export default function Admin() {
                     </span>
                   </motion.div>
                 ))}
+                {!filteredLogs.length ? (
+                  <p className="text-xs text-muted-foreground">No audit log records matched the current search.</p>
+                ) : null}
               </div>
             </div>
           </SectionReveal>
@@ -578,6 +592,9 @@ export default function Admin() {
                     <p className="text-[10px] text-muted-foreground font-mono mt-1">Source: {threat.source}</p>
                   </motion.div>
                 ))}
+                {!threatFeed.length ? (
+                  <p className="text-xs text-muted-foreground">No threat-feed records were returned by the backend.</p>
+                ) : null}
               </div>
             </div>
           </SectionReveal>
@@ -610,6 +627,9 @@ export default function Admin() {
                       <span className="font-mono font-medium">{item.value}</span>
                     </div>
                   ))}
+                  {!roleDistribution.length ? (
+                    <p className="text-xs text-muted-foreground">No role-distribution records were returned by the backend.</p>
+                  ) : null}
                 </div>
               </div>
             </SectionReveal>

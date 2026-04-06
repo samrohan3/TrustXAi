@@ -6,7 +6,6 @@ import {
 } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import SectionReveal from "@/components/shared/SectionReveal";
-import { blockchainEntries as fallbackBlockchainEntries, type BlockchainEntry } from "@/data/mockData";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAnimatedCounter } from "@/hooks/useAnimatedCounter";
 import {
@@ -18,6 +17,16 @@ import {
   type BackendSmartContract,
 } from "@/lib/backendApi";
 import VisualMetricStrip from "@/components/shared/VisualMetricStrip";
+
+interface BlockchainEntry {
+  txHash: string;
+  blockNumber: number;
+  timestamp: string;
+  action: string;
+  fraudDnaHash: string;
+  status: "confirmed" | "pending";
+  gasUsed: number;
+}
 
 const actionColor: Record<string, string> = {
   STORE_FRAUD_DNA: "bg-primary/10 text-primary",
@@ -40,13 +49,6 @@ interface SmartContractView {
   status: string;
 }
 
-const fallbackSmartContracts: SmartContractView[] = [
-  { name: "FraudDNARegistry.sol", address: "0x742d...35Cc", calls: 2847, status: "active" },
-  { name: "RiskOracle.sol", address: "0x1f9a...8bD2", calls: 12340, status: "active" },
-  { name: "ComplianceGate.sol", address: "0x3e7c...4aF1", calls: 5621, status: "active" },
-  { name: "AlertDispatcher.sol", address: "0x8b2d...9cE3", calls: 891, status: "paused" },
-];
-
 const actionFunctionMap: Record<string, string> = {
   STORE_FRAUD_DNA: "storeFraudDNA(bytes32,uint256)",
   FLAG_TRANSACTION: "flagTransaction(bytes32)",
@@ -60,23 +62,6 @@ const actionContractMap: Record<string, string> = {
   UPDATE_RISK_SCORE: "RiskOracle",
   SMART_CONTRACT_EXEC: "AlertDispatcher",
 };
-
-// Generate live chain events
-let eventCounter = 100;
-function randomEvent(): BlockchainEntry {
-  eventCounter++;
-  const actions = ["STORE_FRAUD_DNA", "FLAG_TRANSACTION", "UPDATE_RISK_SCORE", "SMART_CONTRACT_EXEC"];
-  const action = actions[Math.floor(Math.random() * actions.length)];
-  return {
-    txHash: `0x${Math.random().toString(16).slice(2, 10)}...${Math.random().toString(16).slice(2, 10)}`,
-    blockNumber: 18847291 + eventCounter,
-    timestamp: new Date().toISOString(),
-    action,
-    fraudDnaHash: `0x${Math.random().toString(16).slice(2, 6)}...${Math.random().toString(16).slice(2, 6)}`,
-    status: Math.random() > 0.15 ? "confirmed" : "pending",
-    gasUsed: Math.floor(25000 + Math.random() * 50000),
-  };
-}
 
 const mapBlockchainEntry = (entry: BackendBlockchainEntry): BlockchainEntry => ({
   txHash: entry.tx_hash,
@@ -99,7 +84,7 @@ export default function BlockchainExplorer() {
   const { authToken } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedEntry, setSelectedEntry] = useState<BlockchainEntry | null>(null);
-  const [liveEntries, setLiveEntries] = useState<BlockchainEntry[]>(fallbackBlockchainEntries);
+  const [liveEntries, setLiveEntries] = useState<BlockchainEntry[]>([]);
   const [contractRows, setContractRows] = useState<SmartContractView[] | null>(null);
   const [backendMetrics, setBackendMetrics] = useState<BackendBlockchainMetrics | null>(null);
   const [chainSyncLoading, setChainSyncLoading] = useState(false);
@@ -108,16 +93,16 @@ export default function BlockchainExplorer() {
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"activity" | "contracts" | "analytics">("activity");
 
-  const contractsData = contractRows ?? fallbackSmartContracts;
+  const contractsData = contractRows ?? [];
 
   const syncBlockchainData = useCallback(
     async (background = false) => {
       if (!authToken) {
         if (!background) {
-          setLiveEntries(fallbackBlockchainEntries);
-          setContractRows(null);
+          setLiveEntries([]);
+          setContractRows([]);
           setBackendMetrics(null);
-          setChainSyncMessage("Backend auth token unavailable. Showing local blockchain simulation.");
+          setChainSyncMessage("Backend auth token unavailable. Sign in to load blockchain telemetry.");
         }
         return;
       }
@@ -137,7 +122,7 @@ export default function BlockchainExplorer() {
         const mappedEntries = entryRows.map(mapBlockchainEntry);
         const mappedContracts = contractDataRows.map(mapSmartContract);
 
-        setLiveEntries(mappedEntries.length ? mappedEntries : fallbackBlockchainEntries);
+        setLiveEntries(mappedEntries);
         setContractRows(mappedContracts);
         setBackendMetrics(metrics);
 
@@ -149,10 +134,10 @@ export default function BlockchainExplorer() {
       } catch (error) {
         if (!background) {
           const detail = error instanceof Error ? error.message : "Failed to load blockchain data.";
-          setLiveEntries(fallbackBlockchainEntries);
-          setContractRows(null);
+          setLiveEntries([]);
+          setContractRows([]);
           setBackendMetrics(null);
-          setChainSyncMessage(`${detail} Falling back to local blockchain simulation.`);
+          setChainSyncMessage(detail);
         }
       } finally {
         if (!background) {
@@ -170,12 +155,7 @@ export default function BlockchainExplorer() {
   // Live chain activity
   useEffect(() => {
     if (!isLive) return;
-    if (!authToken) {
-      const id = setInterval(() => {
-        setLiveEntries((previous) => [randomEvent(), ...previous].slice(0, 20));
-      }, 5000);
-      return () => clearInterval(id);
-    }
+    if (!authToken) return;
 
     const id = setInterval(() => {
       void syncBlockchainData(true);
@@ -227,7 +207,7 @@ export default function BlockchainExplorer() {
 
   const totalBlocksValue = liveEntries.length
     ? Math.max(...liveEntries.map((entry) => entry.blockNumber))
-    : 18847291;
+    : 0;
   const fraudSignatureValue = liveEntries.filter((entry) => entry.action === "STORE_FRAUD_DNA").length;
   const confirmationStat = backendMetrics?.confirmation_rate ?? confirmationRate;
   const averageGasStat = backendMetrics?.average_gas ?? avgGasLive;
@@ -248,6 +228,53 @@ export default function BlockchainExplorer() {
     [filteredEntries],
   );
 
+  const chainHealthMetrics = useMemo(
+    () => [
+      {
+        label: "Top Block",
+        value: totalBlocksValue ? `#${totalBlocksValue.toLocaleString()}` : "n/a",
+        status: "normal",
+      },
+      {
+        label: "Pending Txns",
+        value: pendingCount.toString(),
+        status: pendingCount > 5 ? "moderate" : "normal",
+      },
+      {
+        label: "Network Load",
+        value: `${Math.min(100, Math.round((avgGasLive / 70000) * 100))}%`,
+        status: avgGasLive > 55000 ? "moderate" : "normal",
+      },
+      {
+        label: "Confirmation",
+        value: `${confirmationRate}%`,
+        status: confirmationRate < 80 ? "moderate" : "normal",
+      },
+      {
+        label: "Active Contracts",
+        value: `${activeContractCount}`,
+        status: activeContractCount > 0 ? "normal" : "moderate",
+      },
+    ],
+    [activeContractCount, avgGasLive, confirmationRate, pendingCount, totalBlocksValue],
+  );
+
+  const actionDistribution = useMemo(() => {
+    if (!filteredEntries.length) return [];
+
+    const counts = filteredEntries.reduce<Record<string, number>>((acc, entry) => {
+      acc[entry.action] = (acc[entry.action] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    return Object.entries(counts)
+      .map(([action, count]) => ({
+        action,
+        pct: Math.max(1, Math.round((count / filteredEntries.length) * 100)),
+      }))
+      .sort((left, right) => right.pct - left.pct);
+  }, [filteredEntries]);
+
   const copyHash = (hash: string) => {
     navigator.clipboard.writeText(hash);
     setCopiedHash(hash);
@@ -262,7 +289,7 @@ export default function BlockchainExplorer() {
           <p className="text-sm text-muted-foreground mt-1">On-chain fraud signatures, smart contracts, and chain analytics</p>
           {chainSyncMessage ? (
             <p className="text-[11px] text-muted-foreground mt-1.5">
-              Data Source: {contractRows ? "MongoDB" : "Local Fallback"} • {chainSyncMessage}
+              {chainSyncMessage}
             </p>
           ) : null}
         </div>
@@ -439,6 +466,9 @@ export default function BlockchainExplorer() {
                     );
                   })}
                 </AnimatePresence>
+                {!filteredEntries.length ? (
+                  <p className="text-xs text-muted-foreground">No blockchain entries match the current filters.</p>
+                ) : null}
               </div>
             </SectionReveal>
           </motion.div>
@@ -472,6 +502,9 @@ export default function BlockchainExplorer() {
                     </div>
                   </motion.div>
                 ))}
+                {!contractsData.length ? (
+                  <p className="text-xs text-muted-foreground">No smart-contract rows were returned by the backend.</p>
+                ) : null}
               </div>
             </div>
 
@@ -490,6 +523,9 @@ export default function BlockchainExplorer() {
                     <span className="text-muted-foreground text-[10px] shrink-0">{log.time}</span>
                   </motion.div>
                 ))}
+                {!recentContractInteractions.length ? (
+                  <p className="text-xs text-muted-foreground">No contract interactions found in the current filter window.</p>
+                ) : null}
               </div>
             </div>
           </motion.div>
@@ -521,13 +557,7 @@ export default function BlockchainExplorer() {
               <div className="glass rounded-xl p-5">
                 <h3 className="text-sm font-semibold mb-4">Chain Health</h3>
                 <div className="space-y-4">
-                  {[
-                    { label: "Block Time", value: "12.4s", status: "normal" },
-                    { label: "Pending Txns", value: "3", status: "normal" },
-                    { label: "Network Load", value: "67%", status: "moderate" },
-                    { label: "Node Uptime", value: "99.97%", status: "normal" },
-                    { label: "Consensus", value: "PoA", status: "normal" },
-                  ].map((m, i) => (
+                  {chainHealthMetrics.map((m, i) => (
                     <motion.div key={m.label} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.06 }}
                       className="flex items-center justify-between">
                       <span className="text-xs text-muted-foreground">{m.label}</span>
@@ -543,15 +573,10 @@ export default function BlockchainExplorer() {
               <div className="glass rounded-xl p-5">
                 <h3 className="text-sm font-semibold mb-4">Action Distribution</h3>
                 <div className="space-y-3">
-                  {[
-                    { action: "STORE_FRAUD_DNA", pct: 42 },
-                    { action: "FLAG_TRANSACTION", pct: 28 },
-                    { action: "UPDATE_RISK_SCORE", pct: 18 },
-                    { action: "SMART_CONTRACT_EXEC", pct: 12 },
-                  ].map((a, i) => (
+                  {actionDistribution.map((a, i) => (
                     <motion.div key={a.action} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.08 }}>
                       <div className="flex items-center justify-between mb-1">
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-medium ${actionColor[a.action]}`}>{a.action}</span>
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-medium ${actionColor[a.action] || "bg-muted text-muted-foreground"}`}>{a.action}</span>
                         <span className="text-xs font-mono">{a.pct}%</span>
                       </div>
                       <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
@@ -561,6 +586,9 @@ export default function BlockchainExplorer() {
                       </div>
                     </motion.div>
                   ))}
+                  {!actionDistribution.length ? (
+                    <p className="text-xs text-muted-foreground">No action-distribution data in the current filter window.</p>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -608,11 +636,11 @@ export default function BlockchainExplorer() {
 
               <div className="mt-4 p-4 rounded-xl bg-secondary/50 font-mono text-[11px] text-muted-foreground space-y-1">
                 <p className="text-foreground font-semibold text-xs mb-2">Transaction Receipt</p>
-                <p>blockHash: 0x{Math.random().toString(16).slice(2, 18)}...</p>
+                <p>blockHash: 0x{selectedEntry.blockNumber.toString(16).padStart(10, "0")}...</p>
                 <p>from: 0x742d...35Cc (FraudDNARegistry)</p>
-                <p>to: 0x{Math.random().toString(16).slice(2, 6)}...{Math.random().toString(16).slice(2, 6)}</p>
+                <p>to: {selectedEntry.fraudDnaHash}</p>
                 <p>gasPrice: 20 Gwei</p>
-                <p>nonce: {Math.floor(Math.random() * 1000)}</p>
+                <p>nonce: {selectedEntry.blockNumber % 1000}</p>
                 <p>status: {selectedEntry.status === "confirmed" ? "✓ Success" : "⏳ Pending"}</p>
               </div>
             </motion.div>

@@ -532,3 +532,15 @@ export async function fetchAdminRoleDistribution(): Promise<BackendRoleDistribut
 export async function fetchAdminDashboardSummary(): Promise<BackendDashboardSummary> {
   return requestJson<BackendDashboardSummary>("/dashboard/admin", { auth: true });
 }
+
+export async function fetchDashboardOverview(): Promise<BackendDashboardSummary> {
+  return requestJson<BackendDashboardSummary>("/dashboard/overview", { auth: true });
+}
+
+export async function fetchAnalystDashboardSummary(): Promise<BackendDashboardSummary> {
+  return requestJson<BackendDashboardSummary>("/dashboard/analyst", { auth: true });
+}
+
+export async function fetchViewerDashboardSummary(): Promise<BackendDashboardSummary> {
+  return requestJson<BackendDashboardSummary>("/dashboard/viewer", { auth: true });
+}

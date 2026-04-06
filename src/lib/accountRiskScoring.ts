@@ -1,4 +1,4 @@
-import type { Transaction } from "@/data/mockData";
+import type { Transaction } from "@/types/domain";
 
 const HIGH_RISK_THRESHOLD = 80;
 const MEDIUM_RISK_THRESHOLD = 60;

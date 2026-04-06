@@ -15,13 +15,9 @@ import {
 } from "lucide-react";
 import SectionReveal from "@/components/shared/SectionReveal";
 import VisualMetricStrip from "@/components/shared/VisualMetricStrip";
-import {
-  alerts as fallbackAlerts,
-  institutions as fallbackInstitutions,
-  modelUpdates as fallbackModelUpdates,
-} from "@/data/mockData";
 import { useAuth } from "@/contexts/AuthContext";
 import {
+  fetchAdminAuditLogs,
   fetchAdminDashboardSummary,
   fetchAdminInstitutions,
   fetchFederatedSnapshot,
@@ -68,15 +64,25 @@ const quickActions = [
   },
 ];
 
-const governanceEvents = [
-  "New institution node joined federated network.",
-  "Critical threat advisory propagated to all member banks.",
-  "Policy baseline updated for high-value transfer monitoring.",
-  "Model update MU-005 rejected after quality validation.",
-];
+interface InstitutionRow {
+  id: string;
+  name: string;
+  type: string;
+  trustScore: number;
+  status: "active" | "suspended" | "pending";
+  nodesCount: number;
+  lastSync: string;
+}
 
-type InstitutionRow = (typeof fallbackInstitutions)[number];
-type ModelUpdateRow = (typeof fallbackModelUpdates)[number];
+interface ModelUpdateRow {
+  id: string;
+  institution: string;
+  version: string;
+  accuracy: number;
+  timestamp: string;
+  status: "merged" | "validating" | "rejected";
+  improvement: number;
+}
 
 const normalizeInstitutionStatus = (status: string): InstitutionRow["status"] => {
   if (status === "active" || status === "suspended" || status === "pending") {
@@ -114,15 +120,17 @@ export default function AdminDashboard() {
   const [dashboardSummary, setDashboardSummary] = useState<BackendDashboardSummary | null>(null);
   const [institutionRows, setInstitutionRows] = useState<InstitutionRow[] | null>(null);
   const [modelUpdateRows, setModelUpdateRows] = useState<ModelUpdateRow[] | null>(null);
+  const [governanceRows, setGovernanceRows] = useState<string[]>([]);
   const [dashboardSyncLoading, setDashboardSyncLoading] = useState(false);
   const [dashboardSyncMessage, setDashboardSyncMessage] = useState<string | null>(null);
 
   const syncDashboardData = useCallback(async () => {
     if (!authToken) {
       setDashboardSummary(null);
-      setInstitutionRows(null);
-      setModelUpdateRows(null);
-      setDashboardSyncMessage("Backend auth token unavailable. Showing local governance dataset.");
+      setInstitutionRows([]);
+      setModelUpdateRows([]);
+      setGovernanceRows([]);
+      setDashboardSyncMessage("Backend auth token unavailable. Sign in to load governance telemetry.");
       return;
     }
 
@@ -130,10 +138,11 @@ export default function AdminDashboard() {
     setDashboardSyncMessage("Syncing governance command data from MongoDB...");
 
     try {
-      const [summary, institutionsResponse, federatedSnapshot] = await Promise.all([
+      const [summary, institutionsResponse, federatedSnapshot, auditRows] = await Promise.all([
         fetchAdminDashboardSummary(),
         fetchAdminInstitutions(),
         fetchFederatedSnapshot(),
+        fetchAdminAuditLogs(),
       ]);
 
       const mappedInstitutions = institutionsResponse.map(mapBackendInstitution);
@@ -150,15 +159,21 @@ export default function AdminDashboard() {
       setDashboardSummary(summary);
       setInstitutionRows(mappedInstitutions);
       setModelUpdateRows(mappedModelUpdates);
+      setGovernanceRows(
+        auditRows
+          .slice(0, 6)
+          .map((entry) => `${entry.action} (${entry.actor} -> ${entry.target})`),
+      );
       setDashboardSyncMessage(
         `Loaded ${mappedInstitutions.length} institutions, ${summary.cards.length} summary cards, and ${mappedModelUpdates.length} model updates from backend APIs.`,
       );
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Failed to load backend admin dashboard data.";
       setDashboardSummary(null);
-      setInstitutionRows(null);
-      setModelUpdateRows(null);
-      setDashboardSyncMessage(`${detail} Falling back to local governance dataset.`);
+      setInstitutionRows([]);
+      setModelUpdateRows([]);
+      setGovernanceRows([]);
+      setDashboardSyncMessage(detail);
     } finally {
       setDashboardSyncLoading(false);
     }
@@ -168,16 +183,14 @@ export default function AdminDashboard() {
     void syncDashboardData();
   }, [syncDashboardData]);
 
-  const institutions = institutionRows ?? fallbackInstitutions;
-  const modelUpdates = modelUpdateRows ?? fallbackModelUpdates;
+  const institutions = useMemo(() => institutionRows ?? [], [institutionRows]);
+  const modelUpdates = useMemo(() => modelUpdateRows ?? [], [modelUpdateRows]);
 
   const activeInstitutions =
     readSummaryCardValue(dashboardSummary, "Institutions Active") ??
     institutions.filter((institution) => institution.status === "active").length;
   const totalNodes = institutions.reduce((sum, institution) => sum + institution.nodesCount, 0);
-  const criticalAlerts =
-    readSummaryCardValue(dashboardSummary, "Critical Alerts") ??
-    fallbackAlerts.filter((alert) => alert.severity === "critical").length;
+  const criticalAlerts = readSummaryCardValue(dashboardSummary, "Critical Alerts") ?? 0;
   const rejectedModels = modelUpdates.filter((update) => update.status === "rejected").length;
   const trustAverage = Math.round(
     institutions.reduce((sum, institution) => sum + institution.trustScore, 0) /
@@ -195,9 +208,12 @@ export default function AdminDashboard() {
 
   const governanceEventFeed = useMemo(() => {
     const summaryLine = dashboardSummary?.summary?.trim();
-    if (!summaryLine) return governanceEvents;
-    return [summaryLine, ...governanceEvents].slice(0, 5);
-  }, [dashboardSummary]);
+    const liveEvents = governanceRows.length
+      ? governanceRows
+      : ["No governance events available from backend."];
+    if (!summaryLine) return liveEvents.slice(0, 5);
+    return [summaryLine, ...liveEvents].slice(0, 5);
+  }, [dashboardSummary, governanceRows]);
 
   return (
     <div className="space-y-6">
@@ -209,7 +225,7 @@ export default function AdminDashboard() {
           </p>
           {dashboardSyncMessage ? (
             <p className="text-[11px] text-muted-foreground mt-1.5">
-              Data Source: {institutionRows ? "MongoDB" : "Local Fallback"} • {dashboardSyncMessage}
+              {dashboardSyncMessage}
             </p>
           ) : null}
         </div>

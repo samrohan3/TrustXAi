@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import type { Transaction } from "@/data/mockData";
+import type { Transaction } from "@/types/domain";
 
 const names = ["Axis Bank", "HDFC", "SBI", "ICICI", "PNB", "Kotak", "Yes Bank", "BOB", "IndusInd", "Federal Bank"];
 const destinations = ["Merchant #4491", "Crypto Exchange", "Shell Co.", "E-commerce", "Insurance Corp", "Offshore Acct", "Utility Provider", "0xF3..a9", "International Wire", "Multiple Recipients"];
