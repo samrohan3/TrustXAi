@@ -96,6 +96,7 @@ export default function AdminDashboard() {
           title="Governance Command Pulse"
           subtitle="Cross-institution trust posture, threat urgency, and model governance health"
           variant="governance"
+          chartType="radial"
           chartPlacement="right"
           metrics={[
             {

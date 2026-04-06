@@ -72,7 +72,11 @@ export default function Settings() {
   const toggleReveal = (id: string) => {
     setRevealedKeys((prev) => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
       return next;
     });
   };
@@ -127,6 +131,7 @@ export default function Settings() {
           title="Configuration Health"
           subtitle="Operational settings posture across alerting, API controls, and interface security"
           variant="settings"
+          chartType="radial"
           chartPlacement="left"
           metrics={[
             {

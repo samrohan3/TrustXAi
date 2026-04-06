@@ -68,6 +68,7 @@ export default function ViewerDashboard() {
           title="Executive Visibility Pulse"
           subtitle="Portfolio health indicators designed for observer and stakeholder monitoring"
           variant="landing"
+          chartType="radar"
           chartPlacement="left"
           metrics={[
             {

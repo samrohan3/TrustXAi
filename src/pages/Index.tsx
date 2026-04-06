@@ -202,6 +202,7 @@ export default function LandingPage() {
               title="Trust Network Readiness"
               subtitle="Operational confidence indicators across onboarding institutions and intelligence lanes"
               variant="landing"
+              chartType="bar"
               chartPlacement="left"
               metrics={[
                 {

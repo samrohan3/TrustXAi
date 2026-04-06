@@ -7,6 +7,7 @@ import {
   Network,
   Clock,
   AlertTriangle,
+  Loader,
   X,
   Target,
   ScanSearch,
@@ -28,6 +29,7 @@ import {
   PolarRadiusAxis,
 } from "recharts";
 import SectionReveal from "@/components/shared/SectionReveal";
+import { useAuth } from "@/contexts/AuthContext";
 import { fraudDNAs, transactions, type FraudDNA } from "@/data/mockData";
 import {
   investigationCases,
@@ -44,6 +46,7 @@ import EntityFilterPanel, {
 import CaseLinkingPanel from "@/components/fraud-intel/CaseLinkingPanel";
 import MoneyFlowTimeline from "@/components/fraud-intel/MoneyFlowTimeline";
 import InvestigationReportGenerator from "@/components/fraud-intel/InvestigationReportGenerator";
+import { fetchMlTrainingRuns, type MlTrainingRun } from "@/lib/backendApi";
 import VisualMetricStrip from "@/components/shared/VisualMetricStrip";
 
 const catColor: Record<string, string> = {
@@ -104,7 +107,13 @@ const layerLabel = (layer: number) => {
   return `Layer ${layer}`;
 };
 
+const asNumber = (value: unknown, fallback = 0): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
 export default function FraudIntelligence() {
+  const { authToken } = useAuth();
   const [selectedDNA, setSelectedDNA] = useState<FraudDNA | null>(null);
   const [activeTab, setActiveTab] = useState<"patterns" | "network" | "timeline">("patterns");
   const [investigationMode, setInvestigationMode] = useState(false);
@@ -115,10 +124,65 @@ export default function FraudIntelligence() {
   const [collapsedLayers, setCollapsedLayers] = useState<number[]>([]);
   const [timelineStep, setTimelineStep] = useState(1);
   const [bankAccountOnly, setBankAccountOnly] = useState(false);
+  const [latestTrainingRun, setLatestTrainingRun] = useState<MlTrainingRun | null>(null);
+  const [mlSyncError, setMlSyncError] = useState<string | null>(null);
+  const [mlSyncLoading, setMlSyncLoading] = useState(false);
 
   const totalPatterns = useAnimatedCounter(fraudDNAs.length, 800);
   const avgSimilarity = useAnimatedCounter(92, 1200, 200);
   const activeThreats = useAnimatedCounter(19, 1000, 300);
+
+  useEffect(() => {
+    if (!authToken) {
+      setLatestTrainingRun(null);
+      setMlSyncError("Sign in with backend auth to view live ML outputs.");
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadLatestTrainingRun = async () => {
+      setMlSyncLoading(true);
+      setMlSyncError(null);
+      try {
+        const runs = await fetchMlTrainingRuns(1);
+        if (!cancelled) {
+          setLatestTrainingRun(runs[0] ?? null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setMlSyncError(error instanceof Error ? error.message : "Failed to load ML training output.");
+        }
+      } finally {
+        if (!cancelled) {
+          setMlSyncLoading(false);
+        }
+      }
+    };
+
+    void loadLatestTrainingRun();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken]);
+
+  const pipelineResults = useMemo(() => {
+    const resultMap = new Map<string, MlTrainingRun["results"][number]>();
+    for (const result of latestTrainingRun?.results ?? []) {
+      resultMap.set(result.pipeline, result);
+    }
+    return resultMap;
+  }, [latestTrainingRun]);
+
+  const amlAlertCount = asNumber(pipelineResults.get("aml_patterns")?.metrics?.total_alerts);
+  const linkedPairCount = asNumber(pipelineResults.get("entities")?.metrics?.linked_pair_count);
+  const suspiciousNodeCount = asNumber(
+    pipelineResults.get("layered_transactions")?.metrics?.suspicious_node_count,
+  );
+  const advancedAuc = asNumber(
+    pipelineResults.get("fraud_detection_financial")?.metrics?.best_auc,
+  );
 
   const mergedInvestigation = useMemo(
     () => mergeInvestigationCases(selectedCaseIds.filter(Boolean)),
@@ -522,6 +586,7 @@ export default function FraudIntelligence() {
           title="Investigation Intelligence Pulse"
           subtitle="Layered case telemetry across spider maps, identity linking, and source to destination movement"
           variant="investigation"
+          chartType="donut"
           chartPlacement="right"
           metrics={[
             {
@@ -569,6 +634,81 @@ export default function FraudIntelligence() {
             `Linked Identity Score: ${linkedIdentityScore}%`,
           ]}
         />
+      </SectionReveal>
+
+      <SectionReveal>
+        <div className="glass rounded-xl p-4 border border-primary/20">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold">Live Backend ML Output</h3>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Snapshot from latest /ml/train/runs result for AML, layering, and entity-linking intelligence.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-[10px] font-semibold">
+              {mlSyncLoading ? (
+                <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-secondary text-muted-foreground">
+                  <Loader className="w-3 h-3 animate-spin" /> Syncing
+                </span>
+              ) : latestTrainingRun ? (
+                <span className="px-2 py-1 rounded-full bg-primary/10 text-primary">
+                  Run {latestTrainingRun.run_id.slice(0, 8)}
+                </span>
+              ) : (
+                <span className="px-2 py-1 rounded-full bg-secondary text-muted-foreground">No Run Data</span>
+              )}
+            </div>
+          </div>
+
+          {mlSyncError && (
+            <p className="text-xs text-warning mt-3">{mlSyncError}</p>
+          )}
+
+          {latestTrainingRun && (
+            <>
+              <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-2 mt-4">
+                <div className="rounded-lg bg-secondary/40 px-3 py-2">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">AML Alerts</p>
+                  <p className="text-sm font-mono font-semibold mt-1">{amlAlertCount}</p>
+                </div>
+                <div className="rounded-lg bg-secondary/40 px-3 py-2">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Entity Links</p>
+                  <p className="text-sm font-mono font-semibold mt-1">{linkedPairCount}</p>
+                </div>
+                <div className="rounded-lg bg-secondary/40 px-3 py-2">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Suspicious Nodes</p>
+                  <p className="text-sm font-mono font-semibold mt-1">{suspiciousNodeCount}</p>
+                </div>
+                <div className="rounded-lg bg-secondary/40 px-3 py-2">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Advanced AUC</p>
+                  <p className="text-sm font-mono font-semibold mt-1">{advancedAuc.toFixed(3)}</p>
+                </div>
+              </div>
+
+              <div className="mt-3 grid lg:grid-cols-2 gap-2">
+                {latestTrainingRun.results.map((result) => (
+                  <div key={result.pipeline} className="rounded-lg border border-border bg-secondary/30 px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-semibold">{result.pipeline}</p>
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
+                          result.status === "success"
+                            ? "bg-success/10 text-success"
+                            : "bg-destructive/10 text-destructive"
+                        }`}
+                      >
+                        {result.status}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground mt-1">
+                      rows: {result.rows} | model: {result.model_type}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
       </SectionReveal>
 
       <SectionReveal>

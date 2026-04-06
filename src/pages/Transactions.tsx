@@ -161,6 +161,7 @@ export default function Transactions() {
           title="Transaction Velocity Lens"
           subtitle="Visual risk telemetry and movement metrics for the active filtered transaction set"
           variant="risk"
+          chartType="radar"
           chartPlacement="left"
           metrics={[
             {

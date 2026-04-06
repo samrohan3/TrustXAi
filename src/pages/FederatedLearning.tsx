@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   BrainCircuit, CheckCircle, XCircle, Loader, Play, Pause, RotateCcw,
@@ -12,7 +12,14 @@ import {
 import SectionReveal from "@/components/shared/SectionReveal";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
+import { useAuth } from "@/contexts/AuthContext";
 import { modelUpdates, institutions } from "@/data/mockData";
+import {
+  fetchFederatedSnapshot,
+  fetchMlTrainingRuns,
+  triggerMlTrainingAll,
+  type MlTrainingRun,
+} from "@/lib/backendApi";
 import VisualMetricStrip from "@/components/shared/VisualMetricStrip";
 
 const statusIcon: Record<string, JSX.Element> = {
@@ -61,27 +68,187 @@ const radarData = [
   { subject: "Speed", HDFC: 92, SBI: 88, Axis: 90, fullMark: 100 },
 ];
 
+const privacyToneClass: Record<string, string> = {
+  warning: "bg-warning",
+  accent: "bg-accent",
+  success: "bg-success",
+  primary: "bg-primary",
+};
+
+const titleMetric = (value: string) =>
+  value
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+
+const asNumber = (value: unknown, fallback = 0): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
 export default function FederatedLearning() {
+  const { authToken } = useAuth();
   const [isTraining, setIsTraining] = useState(false);
   const [currentRound, setCurrentRound] = useState(0);
   const [trainingLog, setTrainingLog] = useState<string[]>([]);
+  const [isBackendBusy, setIsBackendBusy] = useState(false);
+  const [backendStatus, setBackendStatus] = useState<string | null>(null);
+  const [latestTrainingRun, setLatestTrainingRun] = useState<MlTrainingRun | null>(null);
 
-  const currentConvergence = convergenceData[Math.max(0, Math.min(currentRound - 1, convergenceData.length - 1))] ?? convergenceData[0];
+  const [liveModelUpdates, setLiveModelUpdates] = useState(modelUpdates);
+  const [liveConvergenceData, setLiveConvergenceData] = useState(convergenceData);
+  const [livePrivacyMetrics, setLivePrivacyMetrics] = useState(privacyMetrics);
+  const [liveNodeHealth, setLiveNodeHealth] = useState(nodeHealth);
+
+  const effectiveModelUpdates = liveModelUpdates.length ? liveModelUpdates : modelUpdates;
+  const effectiveConvergenceData = liveConvergenceData.length ? liveConvergenceData : convergenceData;
+  const effectivePrivacyMetrics = livePrivacyMetrics.length ? livePrivacyMetrics : privacyMetrics;
+  const effectiveNodeHealth = liveNodeHealth.length ? liveNodeHealth : nodeHealth;
+
+  const totalRounds = Math.max(effectiveConvergenceData.length, 1);
+
+  const dynamicAccuracyData = useMemo(() => {
+    const grouped = new Map<string, { current: number; previous: number }>();
+
+    for (const update of effectiveModelUpdates) {
+      if (!grouped.has(update.institution)) {
+        const previous = Number((update.accuracy - update.improvement).toFixed(1));
+        grouped.set(update.institution, {
+          current: update.accuracy,
+          previous,
+        });
+      }
+    }
+
+    return Array.from(grouped.entries()).map(([institution, scores]) => ({
+      institution: institution.replace(/\s+Bank$/i, ""),
+      accuracy: scores.current,
+      prevAccuracy: scores.previous,
+    }));
+  }, [effectiveModelUpdates]);
+
+  const displayedAccuracyData = dynamicAccuracyData.length ? dynamicAccuracyData : accuracyData;
+
+  const currentConvergence =
+    effectiveConvergenceData[Math.max(0, Math.min(currentRound - 1, effectiveConvergenceData.length - 1))] ??
+    effectiveConvergenceData[0];
   const privacyStrength = Math.round(
-    privacyMetrics.reduce((sum, metric) => sum + metric.value, 0) / Math.max(privacyMetrics.length, 1),
+    effectivePrivacyMetrics.reduce((sum, metric) => sum + metric.value, 0) /
+      Math.max(effectivePrivacyMetrics.length, 1),
   );
-  const onlineNodeCount = institutions.filter((inst) => inst.status === "active").length;
+  const onlineNodeCount = effectiveNodeHealth.filter((inst) => inst.status === "active").length;
 
-  const federationTrend = convergenceData
+  const federationTrend = effectiveConvergenceData
     .slice(0, Math.max(currentRound, 8))
     .map((entry) => ({
       label: `R${entry.round}`,
       value: entry.accuracy,
     }));
 
+  const syncBackendData = async () => {
+    if (!authToken) {
+      setBackendStatus("Sign in to sync live backend metrics.");
+      return;
+    }
+
+    setIsBackendBusy(true);
+    setBackendStatus(null);
+
+    try {
+      const [snapshot, runs] = await Promise.all([
+        fetchFederatedSnapshot(),
+        fetchMlTrainingRuns(1),
+      ]);
+
+      setLiveModelUpdates(
+        snapshot.modelUpdates.map((update) => ({
+          id: update.id,
+          institution: update.institution,
+          version: update.version,
+          accuracy: update.accuracy,
+          timestamp: update.timestamp,
+          status: update.status as "merged" | "validating" | "rejected",
+          improvement: update.improvement,
+        })),
+      );
+
+      setLiveConvergenceData(
+        snapshot.convergence.map((point) => ({
+          round: point.round,
+          globalLoss: point.global_loss,
+          accuracy: point.accuracy,
+        })),
+      );
+
+      setLivePrivacyMetrics(
+        snapshot.privacy.map((metric) => ({
+          metric: titleMetric(metric.metric),
+          value: metric.value,
+          max: metric.max_value,
+          color: privacyToneClass[metric.color] || "bg-primary",
+        })),
+      );
+
+      setLiveNodeHealth(
+        snapshot.nodeHealth.map((node) => ({
+          name: node.name,
+          cpu: node.cpu,
+          memory: node.memory,
+          gpu: node.gpu,
+          latency: node.latency,
+          status: node.status,
+        })),
+      );
+
+      setLatestTrainingRun(runs[0] ?? null);
+      setBackendStatus("Backend metrics synced.");
+    } catch (error) {
+      setBackendStatus(error instanceof Error ? error.message : "Failed to sync backend metrics.");
+    } finally {
+      setIsBackendBusy(false);
+    }
+  };
+
+  const runBackendTraining = async () => {
+    if (!authToken) {
+      setBackendStatus("Sign in to trigger backend model training.");
+      return;
+    }
+
+    setIsBackendBusy(true);
+    setBackendStatus("Training pipelines on backend. This can take a couple of minutes...");
+
+    try {
+      const run = await triggerMlTrainingAll();
+      setLatestTrainingRun(run);
+      setTrainingLog((previous) => {
+        const lines = [
+          `Run ${run.run_id.slice(0, 8)} completed in ${run.duration_seconds.toFixed(1)}s (${run.succeeded}/${run.requested_pipelines.length} pipelines).`,
+          ...run.results.map((result) => `${result.pipeline}: ${result.status} (${result.rows} rows)`),
+        ];
+        return [...lines, ...previous].slice(0, 60);
+      });
+
+      await syncBackendData();
+      setBackendStatus(`Training finished. ${run.succeeded} pipeline(s) succeeded.`);
+    } catch (error) {
+      setBackendStatus(error instanceof Error ? error.message : "Backend training failed.");
+    } finally {
+      setIsBackendBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!authToken) {
+      return;
+    }
+    void syncBackendData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authToken]);
+
   useEffect(() => {
     if (!isTraining) return;
-    if (currentRound >= 20) {
+    if (currentRound >= totalRounds) {
       setIsTraining(false);
       setTrainingLog((p) => [...p, "✅ Training complete — Global model converged"]);
       return;
@@ -89,15 +256,15 @@ export default function FederatedLearning() {
     const id = setTimeout(() => {
       setCurrentRound((r) => r + 1);
       const msgs = [
-        `Round ${currentRound + 1}: Distributing model to ${institutions.length} nodes...`,
+        `Round ${currentRound + 1}: Distributing model to ${effectiveNodeHealth.length} nodes...`,
         `Round ${currentRound + 1}: Local training complete (${(Math.random() * 2 + 1).toFixed(1)}s avg)`,
         `Round ${currentRound + 1}: Aggregating gradients with SecAgg protocol`,
-        `Round ${currentRound + 1}: Global loss = ${convergenceData[currentRound]?.globalLoss} | Acc = ${convergenceData[currentRound]?.accuracy}%`,
+        `Round ${currentRound + 1}: Global loss = ${effectiveConvergenceData[currentRound]?.globalLoss} | Acc = ${effectiveConvergenceData[currentRound]?.accuracy}%`,
       ];
       setTrainingLog((p) => [...p, msgs[currentRound % msgs.length]]);
     }, 800);
     return () => clearTimeout(id);
-  }, [isTraining, currentRound]);
+  }, [isTraining, currentRound, effectiveConvergenceData, effectiveNodeHealth.length, totalRounds]);
 
   const resetTraining = () => {
     setCurrentRound(0);
@@ -113,6 +280,22 @@ export default function FederatedLearning() {
           <p className="text-sm text-muted-foreground mt-1">Decentralized model training across institutional nodes</p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={runBackendTraining}
+            disabled={isBackendBusy || !authToken}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-warning text-warning-foreground text-xs font-semibold hover:bg-warning/90 transition-colors disabled:opacity-60"
+          >
+            {isBackendBusy ? <Loader className="w-3.5 h-3.5 animate-spin" /> : <BrainCircuit className="w-3.5 h-3.5" />}
+            {isBackendBusy ? "Running Backend ML" : "Run Backend ML"}
+          </button>
+          <button
+            onClick={() => void syncBackendData()}
+            disabled={isBackendBusy || !authToken}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-secondary text-xs font-semibold hover:bg-secondary/80 transition-colors disabled:opacity-60"
+          >
+            <RotateCcw className={`w-3.5 h-3.5 ${isBackendBusy ? "animate-spin" : ""}`} />
+            Sync
+          </button>
           <button
             onClick={() => setIsTraining(!isTraining)}
             className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-xs font-semibold hover:bg-primary/90 transition-colors"
@@ -131,6 +314,7 @@ export default function FederatedLearning() {
           title="Federation Telemetry"
           subtitle="Cross-institution model training health, privacy posture, and convergence stability"
           variant="federation"
+          chartType="radial"
           chartPlacement="left"
           metrics={[
             {
@@ -163,7 +347,7 @@ export default function FederatedLearning() {
             },
             {
               label: "Online Nodes",
-              value: `${onlineNodeCount}/${institutions.length}`,
+              value: `${onlineNodeCount}/${effectiveNodeHealth.length || institutions.length}`,
               hint: "active participating institutions",
               icon: Server,
               tone: "accent",
@@ -180,6 +364,77 @@ export default function FederatedLearning() {
         />
       </SectionReveal>
 
+      <SectionReveal>
+        <div className="glass rounded-xl p-5">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold">Backend ML Training Output</h3>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Live run summary from /ml/train/runs and /ml/train/all endpoints.
+              </p>
+            </div>
+            {latestTrainingRun && (
+              <span className="text-[10px] px-2 py-1 rounded-full bg-primary/10 text-primary font-semibold">
+                Run {latestTrainingRun.run_id.slice(0, 8)}
+              </span>
+            )}
+          </div>
+
+          {backendStatus && (
+            <p className="text-xs mt-3 text-muted-foreground">{backendStatus}</p>
+          )}
+
+          {latestTrainingRun ? (
+            <>
+              <div className="grid sm:grid-cols-4 gap-3 mt-4">
+                <div className="rounded-lg bg-secondary/50 p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Duration</p>
+                  <p className="text-sm font-mono font-semibold mt-1">{latestTrainingRun.duration_seconds.toFixed(1)}s</p>
+                </div>
+                <div className="rounded-lg bg-secondary/50 p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Succeeded</p>
+                  <p className="text-sm font-mono font-semibold mt-1 text-success">{latestTrainingRun.succeeded}</p>
+                </div>
+                <div className="rounded-lg bg-secondary/50 p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Failed</p>
+                  <p className="text-sm font-mono font-semibold mt-1 text-destructive">{latestTrainingRun.failed}</p>
+                </div>
+                <div className="rounded-lg bg-secondary/50 p-3">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Pipelines</p>
+                  <p className="text-sm font-mono font-semibold mt-1">{latestTrainingRun.requested_pipelines.length}</p>
+                </div>
+              </div>
+
+              <div className="mt-4 grid lg:grid-cols-2 gap-2">
+                {latestTrainingRun.results.map((result) => (
+                  <div key={result.pipeline} className="rounded-lg border border-border bg-secondary/30 px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-semibold">{result.pipeline}</p>
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
+                          result.status === "success"
+                            ? "bg-success/10 text-success"
+                            : "bg-destructive/10 text-destructive"
+                        }`}
+                      >
+                        {result.status}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground mt-1">
+                      rows: {result.rows} | model: {result.model_type}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground mt-3">
+              No backend training run found yet. Click "Run Backend ML" to generate one.
+            </p>
+          )}
+        </div>
+      </SectionReveal>
+
       {/* Training Progress Bar */}
       <SectionReveal>
         <div className="glass rounded-xl p-5">
@@ -188,14 +443,32 @@ export default function FederatedLearning() {
               <BrainCircuit className={`w-4 h-4 ${isTraining ? "text-primary animate-pulse" : "text-muted-foreground"}`} />
               <h3 className="text-sm font-semibold">Training Progress</h3>
             </div>
-            <span className="text-xs font-mono text-muted-foreground">Round {currentRound}/20</span>
+            <span className="text-xs font-mono text-muted-foreground">Round {currentRound}/{totalRounds}</span>
           </div>
-          <Progress value={(currentRound / 20) * 100} className="h-2 mb-4" />
+          <Progress value={(currentRound / totalRounds) * 100} className="h-2 mb-4" />
           <div className="grid grid-cols-4 gap-3">
             {[
-              { label: "Global Accuracy", value: currentRound > 0 ? `${convergenceData[Math.min(currentRound - 1, 19)]?.accuracy}%` : "—", icon: TrendingUp },
-              { label: "Global Loss", value: currentRound > 0 ? convergenceData[Math.min(currentRound - 1, 19)]?.globalLoss : "—", icon: Cpu },
-              { label: "Active Nodes", value: `${institutions.length}/${institutions.length}`, icon: Server },
+              {
+                label: "Global Accuracy",
+                value:
+                  currentRound > 0
+                    ? `${effectiveConvergenceData[Math.min(currentRound - 1, totalRounds - 1)]?.accuracy}%`
+                    : "—",
+                icon: TrendingUp,
+              },
+              {
+                label: "Global Loss",
+                value:
+                  currentRound > 0
+                    ? effectiveConvergenceData[Math.min(currentRound - 1, totalRounds - 1)]?.globalLoss
+                    : "—",
+                icon: Cpu,
+              },
+              {
+                label: "Active Nodes",
+                value: `${onlineNodeCount}/${effectiveNodeHealth.length || institutions.length}`,
+                icon: Server,
+              },
               { label: "Privacy Budget", value: "ε = 3.2", icon: Lock },
             ].map((s) => (
               <div key={s.label} className="p-3 rounded-lg bg-secondary/50 text-center">
@@ -223,7 +496,7 @@ export default function FederatedLearning() {
               <div className="glass rounded-xl p-5">
                 <h3 className="text-sm font-semibold mb-4">Model Accuracy by Institution</h3>
                 <ResponsiveContainer width="100%" height={240}>
-                  <BarChart data={accuracyData}>
+                  <BarChart data={displayedAccuracyData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 16%, 14%)" />
                     <XAxis dataKey="institution" stroke="hsl(220, 10%, 50%)" fontSize={11} />
                     <YAxis domain={[90, 100]} stroke="hsl(220, 10%, 50%)" fontSize={11} />
@@ -261,7 +534,7 @@ export default function FederatedLearning() {
               <div className="glass rounded-xl p-5">
                 <h3 className="text-sm font-semibold mb-4">Loss Convergence</h3>
                 <ResponsiveContainer width="100%" height={260}>
-                  <AreaChart data={convergenceData.slice(0, Math.max(currentRound, 1))}>
+                  <AreaChart data={effectiveConvergenceData.slice(0, Math.max(currentRound, 1))}>
                     <defs>
                       <linearGradient id="lossGrad" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="5%" stopColor="hsl(0, 72%, 51%)" stopOpacity={0.3} />
@@ -282,7 +555,7 @@ export default function FederatedLearning() {
               <div className="glass rounded-xl p-5">
                 <h3 className="text-sm font-semibold mb-4">Accuracy Over Rounds</h3>
                 <ResponsiveContainer width="100%" height={260}>
-                  <LineChart data={convergenceData.slice(0, Math.max(currentRound, 1))}>
+                  <LineChart data={effectiveConvergenceData.slice(0, Math.max(currentRound, 1))}>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 16%, 14%)" />
                     <XAxis dataKey="round" stroke="hsl(220, 10%, 50%)" fontSize={11} />
                     <YAxis domain={[85, 100]} stroke="hsl(220, 10%, 50%)" fontSize={11} />
@@ -330,7 +603,7 @@ export default function FederatedLearning() {
                   <h3 className="text-sm font-semibold">Differential Privacy Metrics</h3>
                 </div>
                 <div className="space-y-4">
-                  {privacyMetrics.map((m) => (
+                  {effectivePrivacyMetrics.map((m) => (
                     <div key={m.metric}>
                       <div className="flex justify-between text-xs mb-1.5">
                         <span className="text-muted-foreground">{m.metric}</span>
@@ -402,7 +675,7 @@ export default function FederatedLearning() {
                     </tr>
                   </thead>
                   <tbody>
-                    {nodeHealth.map((node, i) => (
+                    {effectiveNodeHealth.map((node, i) => (
                       <motion.tr
                         key={node.name}
                         initial={{ opacity: 0 }}
@@ -449,7 +722,7 @@ export default function FederatedLearning() {
         <div className="glass rounded-xl p-5">
           <h3 className="text-sm font-semibold mb-4">Recent Model Updates</h3>
           <div className="space-y-2">
-            {modelUpdates.map((update, i) => (
+            {effectiveModelUpdates.map((update, i) => (
               <motion.div
                 key={update.id}
                 initial={{ opacity: 0, y: 8 }}
@@ -457,7 +730,7 @@ export default function FederatedLearning() {
                 transition={{ delay: i * 0.05 }}
                 className="flex items-center gap-4 p-3 rounded-lg bg-secondary/50 hover:bg-secondary transition-colors"
               >
-                <div className="shrink-0">{statusIcon[update.status]}</div>
+                <div className="shrink-0">{statusIcon[update.status] ?? <Loader className="w-4 h-4 text-muted-foreground" />}</div>
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-medium">{update.institution}</p>
                   <p className="text-[10px] text-muted-foreground font-mono">{update.version}</p>

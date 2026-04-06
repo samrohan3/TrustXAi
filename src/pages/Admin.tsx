@@ -111,6 +111,7 @@ export default function Admin() {
           title="Governance Pulse"
           subtitle="Administrative visibility across institutions, audits, and live threat pressure"
           variant="governance"
+          chartType="radar"
           chartPlacement="right"
           metrics={[
             {

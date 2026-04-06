@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Boxes, CheckCircle, Clock, Hash, Search, Copy, ExternalLink, Cpu, Database,
-  Shield, Activity, Radio, X, ChevronRight, Server,
+  Shield, Activity, Radio, X, ChevronRight, Server, type LucideIcon,
 } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import SectionReveal from "@/components/shared/SectionReveal";
@@ -17,7 +17,7 @@ const actionColor: Record<string, string> = {
   SMART_CONTRACT_EXEC: "bg-accent/10 text-accent",
 };
 
-const actionIcon: Record<string, any> = {
+const actionIcon: Record<string, LucideIcon> = {
   STORE_FRAUD_DNA: Database,
   FLAG_TRANSACTION: Shield,
   UPDATE_RISK_SCORE: Activity,
@@ -132,6 +132,7 @@ export default function BlockchainExplorer() {
           title="Chain Integrity Pulse"
           subtitle="On-chain validation metrics for fraud signature anchoring and contract execution health"
           variant="chain"
+          chartType="scatter"
           chartPlacement="right"
           metrics={[
             {

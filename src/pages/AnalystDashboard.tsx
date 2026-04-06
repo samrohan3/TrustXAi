@@ -80,6 +80,7 @@ export default function AnalystDashboard() {
           title="Analyst Hunt Pulse"
           subtitle="Operational signal stack for case triage and suspicious flow prioritization"
           variant="investigation"
+          chartType="donut"
           chartPlacement="right"
           metrics={[
             {
