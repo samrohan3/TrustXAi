@@ -1,15 +1,25 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Shield, Building2, Wifi, WifiOff, Users, Activity, AlertTriangle,
-  Clock, Globe, Server, FileText, Search, ChevronDown, ChevronUp,
+  Clock, Globe, Server, FileText, Search, ChevronDown, ChevronUp, RotateCcw,
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import SectionReveal from "@/components/shared/SectionReveal";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
-import { institutions } from "@/data/mockData";
+import { institutions as fallbackInstitutions } from "@/data/mockData";
 import { useAuth } from "@/contexts/AuthContext";
+import {
+  fetchAdminAuditLogs,
+  fetchAdminInstitutions,
+  fetchAdminRoleDistribution,
+  fetchAdminThreatFeed,
+  type BackendAuditLog,
+  type BackendInstitution,
+  type BackendRoleDistribution,
+  type BackendThreatFeed,
+} from "@/lib/backendApi";
 import VisualMetricStrip from "@/components/shared/VisualMetricStrip";
 
 const trustColor = (score: number) => {
@@ -18,7 +28,7 @@ const trustColor = (score: number) => {
   return "text-warning";
 };
 
-const auditLogs = [
+const fallbackAuditLogs = [
   { id: 1, user: "admin@rbi.gov.in", action: "Modified RLS policy", target: "fraud_reports", timestamp: "2024-03-15T14:23:00Z", severity: "high" },
   { id: 2, user: "analyst@sbi.co.in", action: "Exported transaction data", target: "transactions", timestamp: "2024-03-15T14:18:00Z", severity: "medium" },
   { id: 3, user: "admin@rbi.gov.in", action: "Added new institution node", target: "Federal Bank", timestamp: "2024-03-15T13:45:00Z", severity: "low" },
@@ -35,14 +45,14 @@ const severityBadge: Record<string, string> = {
   low: "bg-muted text-muted-foreground",
 };
 
-const roleDistribution = [
+const fallbackRoleDistribution = [
   { name: "Admin", value: 3, fill: "hsl(48, 96%, 53%)" },
   { name: "Analyst", value: 12, fill: "hsl(210, 100%, 60%)" },
   { name: "Viewer", value: 28, fill: "hsl(142, 72%, 45%)" },
   { name: "Auditor", value: 5, fill: "hsl(38, 92%, 50%)" },
 ];
 
-const threatFeed = [
+const fallbackThreatFeed = [
   { id: 1, type: "Phishing Campaign", source: "CERT-In", severity: "critical", time: "2m ago", desc: "New phishing kit targeting UPI payment flows" },
   { id: 2, type: "Ransomware Alert", source: "FS-ISAC", severity: "high", time: "15m ago", desc: "LockBit variant targeting banking SWIFT endpoints" },
   { id: 3, type: "Data Breach", source: "DarkWeb Monitor", severity: "high", time: "1h ago", desc: "Credential dump containing 50K Indian bank accounts" },
@@ -50,19 +60,144 @@ const threatFeed = [
   { id: 5, type: "Bot Network", source: "Honeypot", severity: "medium", time: "5h ago", desc: "Automated account creation attempts detected" },
 ];
 
-const systemMetrics = [
-  { label: "API Requests/min", value: "12,847", trend: "+8%", icon: Activity },
-  { label: "Active Sessions", value: "43", trend: "+2", icon: Users },
-  { label: "Avg Latency", value: "142ms", trend: "-12ms", icon: Clock },
-  { label: "Uptime", value: "99.97%", trend: "30d", icon: Server },
-];
+type InstitutionRow = (typeof fallbackInstitutions)[number];
+type AuditLogRow = (typeof fallbackAuditLogs)[number];
+type ThreatFeedRow = (typeof fallbackThreatFeed)[number];
+type RoleDistributionRow = (typeof fallbackRoleDistribution)[number];
+
+const roleFillByName: Record<string, string> = {
+  Admin: "hsl(48, 96%, 53%)",
+  Analyst: "hsl(210, 100%, 60%)",
+  Viewer: "hsl(142, 72%, 45%)",
+  Auditor: "hsl(38, 92%, 50%)",
+};
+
+const normalizeInstitutionStatus = (status: string): InstitutionRow["status"] => {
+  if (status === "active" || status === "suspended" || status === "pending") {
+    return status;
+  }
+  return "pending";
+};
+
+const mapBackendInstitution = (institution: BackendInstitution): InstitutionRow => ({
+  id: institution.id,
+  name: institution.name,
+  type: institution.type,
+  trustScore: institution.trust_score,
+  status: normalizeInstitutionStatus(institution.status),
+  nodesCount: institution.nodes_count,
+  lastSync: institution.last_sync,
+});
+
+const mapBackendAuditLog = (log: BackendAuditLog): AuditLogRow => ({
+  id: log.id,
+  user: log.actor,
+  action: log.action,
+  target: log.target,
+  timestamp: log.timestamp,
+  severity: log.severity,
+});
+
+const mapBackendThreatFeed = (entry: BackendThreatFeed): ThreatFeedRow => ({
+  id: entry.id,
+  type: entry.threat_type,
+  source: entry.source,
+  severity: entry.severity,
+  time: entry.time_label,
+  desc: entry.description,
+});
+
+const toRoleLabel = (role: string): string => {
+  if (role.toLowerCase() === "admin") return "Admin";
+  if (role.toLowerCase() === "analyst") return "Analyst";
+  if (role.toLowerCase() === "viewer") return "Viewer";
+  if (role.toLowerCase() === "auditor") return "Auditor";
+  return role.charAt(0).toUpperCase() + role.slice(1);
+};
+
+const mapBackendRoleDistribution = (distribution: BackendRoleDistribution): RoleDistributionRow[] => {
+  const entries = Object.entries(distribution);
+  if (!entries.length) return [];
+
+  return entries
+    .map(([role, value]) => {
+      const name = toRoleLabel(role);
+      return {
+        name,
+        value,
+        fill: roleFillByName[name] ?? "hsl(220, 10%, 50%)",
+      };
+    })
+    .sort((left, right) => right.value - left.value);
+};
 
 export default function Admin() {
-  const { user } = useAuth();
+  const { user, authToken } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
   const [expandedInst, setExpandedInst] = useState<string | null>(null);
-  const [liveAlertCount, setLiveAlertCount] = useState(threatFeed.length);
+  const [institutionsRows, setInstitutionsRows] = useState<InstitutionRow[] | null>(null);
+  const [auditRows, setAuditRows] = useState<AuditLogRow[] | null>(null);
+  const [threatRows, setThreatRows] = useState<ThreatFeedRow[] | null>(null);
+  const [roleRows, setRoleRows] = useState<RoleDistributionRow[] | null>(null);
+  const [adminSyncLoading, setAdminSyncLoading] = useState(false);
+  const [adminSyncMessage, setAdminSyncMessage] = useState<string | null>(null);
 
+  const syncAdminData = useCallback(async () => {
+    if (!authToken) {
+      setInstitutionsRows(null);
+      setAuditRows(null);
+      setThreatRows(null);
+      setRoleRows(null);
+      setAdminSyncMessage("Backend auth token unavailable. Showing local admin dataset.");
+      return;
+    }
+
+    setAdminSyncLoading(true);
+    setAdminSyncMessage("Syncing governance data from MongoDB...");
+
+    try {
+      const [institutionRows, auditLogRows, threatFeedRows, roleDistributionRows] = await Promise.all([
+        fetchAdminInstitutions(),
+        fetchAdminAuditLogs(),
+        fetchAdminThreatFeed(),
+        fetchAdminRoleDistribution(),
+      ]);
+
+      const mappedInstitutions = institutionRows.map(mapBackendInstitution);
+      const mappedAuditLogs = auditLogRows.map(mapBackendAuditLog);
+      const mappedThreatFeed = threatFeedRows.map(mapBackendThreatFeed);
+      const mappedRoleDistribution = mapBackendRoleDistribution(roleDistributionRows);
+
+      setInstitutionsRows(mappedInstitutions);
+      setAuditRows(mappedAuditLogs);
+      setThreatRows(mappedThreatFeed);
+      setRoleRows(mappedRoleDistribution.length ? mappedRoleDistribution : null);
+
+      setAdminSyncMessage(
+        `Loaded ${mappedInstitutions.length} institutions, ${mappedAuditLogs.length} audit events, and ${mappedThreatFeed.length} threat alerts from MongoDB.`,
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Failed to load backend admin data.";
+      setInstitutionsRows(null);
+      setAuditRows(null);
+      setThreatRows(null);
+      setRoleRows(null);
+      setAdminSyncMessage(`${detail} Falling back to local admin dataset.`);
+    } finally {
+      setAdminSyncLoading(false);
+    }
+  }, [authToken]);
+
+  useEffect(() => {
+    void syncAdminData();
+  }, [syncAdminData]);
+
+  const institutions = institutionsRows ?? fallbackInstitutions;
+  const auditLogs = auditRows ?? fallbackAuditLogs;
+  const threatFeed = threatRows ?? fallbackThreatFeed;
+  const roleDistribution = roleRows ?? fallbackRoleDistribution;
+
+  const liveAlertCount = threatFeed.length;
   const activeInstitutionCount = institutions.filter((inst) => inst.status === "active").length;
   const averageTrust = Math.round(
     institutions.reduce((sum, inst) => sum + inst.trustScore, 0) / Math.max(institutions.length, 1),
@@ -70,27 +205,69 @@ export default function Admin() {
   const highSeverityAudits = auditLogs.filter((log) => log.severity === "high").length;
   const criticalThreatCount = threatFeed.filter((threat) => threat.severity === "critical").length;
   const totalInstitutionNodes = institutions.reduce((sum, inst) => sum + inst.nodesCount, 0);
+  const totalRoleUsers = roleDistribution.reduce((sum, role) => sum + role.value, 0);
 
-  const governanceTrend = auditLogs
-    .slice(0, 10)
-    .reverse()
-    .map((log, index) => ({
-      label: `E${index + 1}`,
-      value: log.severity === "high" ? 95 : log.severity === "medium" ? 72 : 48,
-    }));
+  const governanceTrend = useMemo(
+    () =>
+      auditLogs
+        .slice(0, 10)
+        .reverse()
+        .map((log, index) => ({
+          label: `E${index + 1}`,
+          value: log.severity === "high" ? 95 : log.severity === "medium" ? 72 : 48,
+        })),
+    [auditLogs],
+  );
 
-  useEffect(() => {
-    const id = setInterval(() => {
-      setLiveAlertCount((c) => c + (Math.random() > 0.7 ? 1 : 0));
-    }, 10000);
-    return () => clearInterval(id);
-  }, []);
+  const systemMetrics = useMemo(
+    () => [
+      {
+        label: "Audit Events",
+        value: auditLogs.length.toLocaleString(),
+        trend: `${highSeverityAudits} high`,
+        icon: Activity,
+      },
+      {
+        label: "Role Accounts",
+        value: totalRoleUsers.toLocaleString(),
+        trend: `${roleDistribution.length} roles`,
+        icon: Users,
+      },
+      {
+        label: "Critical Threats",
+        value: criticalThreatCount.toString(),
+        trend: `${threatFeed.length} total`,
+        icon: Clock,
+      },
+      {
+        label: "Institutions Online",
+        value: `${activeInstitutionCount}/${institutions.length}`,
+        trend: `${totalInstitutionNodes} nodes`,
+        icon: Server,
+      },
+    ],
+    [
+      activeInstitutionCount,
+      auditLogs.length,
+      criticalThreatCount,
+      highSeverityAudits,
+      institutions.length,
+      roleDistribution.length,
+      threatFeed.length,
+      totalInstitutionNodes,
+      totalRoleUsers,
+    ],
+  );
 
-  const filteredLogs = auditLogs.filter(
-    (log) =>
-      log.action.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      log.user.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      log.target.toLowerCase().includes(searchQuery.toLowerCase())
+  const filteredLogs = useMemo(
+    () =>
+      auditLogs.filter(
+        (log) =>
+          log.action.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          log.user.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          log.target.toLowerCase().includes(searchQuery.toLowerCase()),
+      ),
+    [auditLogs, searchQuery],
   );
 
   return (
@@ -99,10 +276,23 @@ export default function Admin() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Admin Panel</h1>
           <p className="text-sm text-muted-foreground mt-1">Manage institutional nodes, users, and access control</p>
+          {adminSyncMessage ? (
+            <p className="text-[11px] text-muted-foreground mt-1.5">
+              Data Source: {institutionsRows ? "MongoDB" : "Local Fallback"} • {adminSyncMessage}
+            </p>
+          ) : null}
         </div>
         <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
           <Globe className="w-4 h-4 text-primary" />
           Logged in as <span className="text-primary font-semibold">{user?.role}</span>
+          <button
+            onClick={() => void syncAdminData()}
+            disabled={adminSyncLoading}
+            className="ml-2 inline-flex items-center gap-1.5 rounded-lg bg-secondary px-3 py-1.5 text-[11px] font-semibold text-muted-foreground hover:text-foreground disabled:cursor-not-allowed"
+          >
+            <RotateCcw className={`w-3.5 h-3.5 ${adminSyncLoading ? "animate-spin" : ""}`} />
+            {adminSyncLoading ? "Syncing" : "Sync MongoDB"}
+          </button>
         </div>
       </div>
 

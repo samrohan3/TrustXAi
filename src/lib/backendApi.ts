@@ -109,6 +109,163 @@ export interface BackendTransactionMetrics {
   total_volume: number;
 }
 
+export interface BackendFraudDNA {
+  id: string;
+  hash: string;
+  pattern: string;
+  similarity: number;
+  detected_at: string;
+  source: string;
+  category: string;
+}
+
+export interface BackendAlert {
+  id: string;
+  title: string;
+  description: string;
+  severity: string;
+  timestamp: string;
+  transaction_id: string;
+}
+
+export interface BackendInvestigationCaseOption {
+  case_id: string;
+  title: string;
+  lead_agency: string;
+}
+
+export interface BackendInvestigationNode {
+  id: string;
+  label: string;
+  node_type: string;
+  role: string;
+  default_layer: number;
+  risk_score: number;
+  holder_name: string;
+  phone: string;
+  ip_address: string;
+  email: string;
+  bank_name: string;
+}
+
+export interface BackendInvestigationEdge {
+  id: string;
+  case_id: string;
+  from_node_id: string;
+  to_node_id: string;
+  amount: number;
+  currency: string;
+  timestamp: string;
+  tx_ref: string;
+}
+
+export interface BackendInvestigationPathRisk {
+  id: string;
+  case_id: string;
+  label: string;
+  risk_score: number;
+  chain: string[];
+  explanation: string;
+}
+
+export interface BackendInvestigationCase {
+  case_id: string;
+  title: string;
+  lead_agency: string;
+  source_node_id: string;
+  destination_node_ids: string[];
+  nodes: BackendInvestigationNode[];
+  edges: BackendInvestigationEdge[];
+  path_risks: BackendInvestigationPathRisk[];
+}
+
+export interface BackendInvestigationMergedResponse {
+  selected_cases: BackendInvestigationCase[];
+  nodes: BackendInvestigationNode[];
+  edges: BackendInvestigationEdge[];
+  source_node_ids: string[];
+  destination_node_ids: string[];
+  path_risks: BackendInvestigationPathRisk[];
+  common_node_ids: string[];
+  shared_pattern_labels: string[];
+}
+
+export interface BackendBlockchainEntry {
+  id: number;
+  tx_hash: string;
+  block_number: number;
+  timestamp: string;
+  action: string;
+  fraud_dna_hash: string;
+  status: "confirmed" | "pending" | string;
+  gas_used: number;
+}
+
+export interface BackendSmartContract {
+  id: number;
+  name: string;
+  address: string;
+  calls: number;
+  status: string;
+}
+
+export interface BackendBlockchainMetrics {
+  confirmation_rate: number;
+  confirmed_count: number;
+  pending_count: number;
+  average_gas: number;
+  active_contract_count: number;
+}
+
+export interface BackendInstitution {
+  id: string;
+  name: string;
+  type: string;
+  trust_score: number;
+  status: "active" | "suspended" | "pending" | string;
+  nodes_count: number;
+  last_sync: string;
+}
+
+export interface BackendAuditLog {
+  id: number;
+  actor: string;
+  action: string;
+  target: string;
+  timestamp: string;
+  severity: string;
+}
+
+export interface BackendThreatFeed {
+  id: number;
+  threat_type: string;
+  source: string;
+  severity: string;
+  time_label: string;
+  description: string;
+}
+
+export interface BackendDashboardCard {
+  label: string;
+  value: string;
+  hint: string | null;
+}
+
+export interface BackendDashboardAction {
+  label: string;
+  path: string;
+}
+
+export interface BackendDashboardSummary {
+  role: string;
+  title: string;
+  summary: string;
+  cards: BackendDashboardCard[];
+  actions: BackendDashboardAction[];
+}
+
+export type BackendRoleDistribution = Record<string, number>;
+
 export interface TransactionQueryParams {
   search?: string;
   status?: BackendTransactionStatus;
@@ -117,6 +274,12 @@ export interface TransactionQueryParams {
   pageSize?: number;
   sortBy?: "timestamp" | "risk_score" | "amount";
   sortDir?: "asc" | "desc";
+}
+
+export interface BlockchainEntriesQueryParams {
+  status?: string;
+  action?: string;
+  search?: string;
 }
 
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000/api/v1";
@@ -289,4 +452,83 @@ export async function fetchAllTransactions(
 
 export async function fetchTransactionMetrics(): Promise<BackendTransactionMetrics> {
   return requestJson<BackendTransactionMetrics>("/transactions/metrics", { auth: true });
+}
+
+export async function fetchFraudDNA(): Promise<BackendFraudDNA[]> {
+  return requestJson<BackendFraudDNA[]>("/fraud-intelligence/dna", { auth: true });
+}
+
+export async function fetchFraudAlerts(): Promise<BackendAlert[]> {
+  return requestJson<BackendAlert[]>("/fraud-intelligence/alerts", { auth: true });
+}
+
+export async function fetchInvestigationCaseOptions(): Promise<BackendInvestigationCaseOption[]> {
+  return requestJson<BackendInvestigationCaseOption[]>("/fraud-intelligence/investigation/options", {
+    auth: true,
+  });
+}
+
+export async function fetchInvestigationCases(): Promise<BackendInvestigationCase[]> {
+  return requestJson<BackendInvestigationCase[]>("/fraud-intelligence/investigation/cases", {
+    auth: true,
+  });
+}
+
+export async function fetchMergedInvestigation(caseIds: string[]): Promise<BackendInvestigationMergedResponse> {
+  const search = new URLSearchParams();
+  for (const caseId of caseIds) {
+    const normalized = caseId.trim();
+    if (normalized) {
+      search.append("case_ids", normalized);
+    }
+  }
+
+  const query = search.toString();
+  const path = query
+    ? `/fraud-intelligence/investigation/merge?${query}`
+    : "/fraud-intelligence/investigation/merge";
+
+  return requestJson<BackendInvestigationMergedResponse>(path, { auth: true });
+}
+
+export async function fetchBlockchainEntries(
+  params: BlockchainEntriesQueryParams = {},
+): Promise<BackendBlockchainEntry[]> {
+  const search = new URLSearchParams();
+  if (params.status) search.set("status", params.status);
+  if (params.action) search.set("action", params.action);
+  if (params.search) search.set("search", params.search);
+  const query = search.toString();
+  const path = query ? `/blockchain/entries?${query}` : "/blockchain/entries";
+
+  return requestJson<BackendBlockchainEntry[]>(path, { auth: true });
+}
+
+export async function fetchBlockchainContracts(): Promise<BackendSmartContract[]> {
+  return requestJson<BackendSmartContract[]>("/blockchain/contracts", { auth: true });
+}
+
+export async function fetchBlockchainMetrics(): Promise<BackendBlockchainMetrics> {
+  return requestJson<BackendBlockchainMetrics>("/blockchain/metrics", { auth: true });
+}
+
+export async function fetchAdminInstitutions(): Promise<BackendInstitution[]> {
+  return requestJson<BackendInstitution[]>("/admin/institutions", { auth: true });
+}
+
+export async function fetchAdminAuditLogs(search?: string): Promise<BackendAuditLog[]> {
+  const encoded = search?.trim() ? `?search=${encodeURIComponent(search.trim())}` : "";
+  return requestJson<BackendAuditLog[]>(`/admin/audit-logs${encoded}`, { auth: true });
+}
+
+export async function fetchAdminThreatFeed(): Promise<BackendThreatFeed[]> {
+  return requestJson<BackendThreatFeed[]>("/admin/threat-feed", { auth: true });
+}
+
+export async function fetchAdminRoleDistribution(): Promise<BackendRoleDistribution> {
+  return requestJson<BackendRoleDistribution>("/admin/role-distribution", { auth: true });
+}
+
+export async function fetchAdminDashboardSummary(): Promise<BackendDashboardSummary> {
+  return requestJson<BackendDashboardSummary>("/dashboard/admin", { auth: true });
 }
