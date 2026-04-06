@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowRight, Eye, EyeOff, Building2, ShieldCheck, Loader2, Radar, Activity } from "lucide-react";
-import { useAuth } from "@/contexts/AuthContext";
+import { getDashboardRouteForRole, useAuth } from "@/contexts/AuthContext";
 import VisualMetricStrip from "@/components/shared/VisualMetricStrip";
 
 const DEMO_ACCOUNTS = [
@@ -35,7 +35,8 @@ export default function Login() {
     setLoading(true);
     const result = await login(email, password);
     setLoading(false);
-    if (result.success) navigate("/dashboard");
+    if (result.success && result.user) navigate(getDashboardRouteForRole(result.user.role));
+    else if (result.success) navigate("/dashboard");
     else setError(result.error || "Login failed");
   };
 
@@ -46,7 +47,8 @@ export default function Login() {
     setLoading(true);
     const result = await login(demoEmail, "demo1234");
     setLoading(false);
-    if (result.success) navigate("/dashboard");
+    if (result.success && result.user) navigate(getDashboardRouteForRole(result.user.role));
+    else if (result.success) navigate("/dashboard");
   };
 
   return (

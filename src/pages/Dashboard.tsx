@@ -89,8 +89,8 @@ export default function Dashboard() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
-          <p className="text-sm text-muted-foreground mt-1">Real-time fraud intelligence overview</p>
+          <h1 className="text-2xl font-bold tracking-tight">Analyst Dashboard</h1>
+          <p className="text-sm text-muted-foreground mt-1">Real-time investigation and fraud intelligence workspace</p>
         </div>
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full ${isLive ? "bg-success animate-pulse" : "bg-muted-foreground"}`} />
