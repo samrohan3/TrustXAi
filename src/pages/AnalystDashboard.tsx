@@ -16,9 +16,17 @@ import {
   Landmark,
   Sigma,
   TrendingUp,
+  Gauge,
+  Siren,
+  Zap,
 } from "lucide-react";
 import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
+  Legend,
   Line,
   LineChart,
   Pie,
@@ -173,10 +181,59 @@ export default function AnalystDashboard() {
       Math.max(alertRows.length, 1)) *
       100,
   );
+  const avgRuleConfidence = Math.round(
+    (alertRows.reduce((sum, alert) => sum + (alert.rule_confidence ?? 0), 0) /
+      Math.max(alertRows.length, 1)) *
+      100,
+  );
+  const modelRuleGap = avgModelConfidence - avgRuleConfidence;
   const institutionCount = new Set(transactionRows.map((transaction) => transaction.institution)).size;
   const highRiskExposure = transactionRows
     .filter((transaction) => transaction.risk_score >= 80)
     .reduce((sum, transaction) => sum + transaction.amount, 0);
+  const escalationRate = Math.round(
+    ((criticalAlerts + alertRows.filter((alert) => alert.severity === "high").length) /
+      Math.max(alertRows.length, 1)) *
+      100,
+  );
+
+  const medianRisk = useMemo(() => {
+    const sorted = transactionRows
+      .map((transaction) => transaction.risk_score)
+      .sort((left, right) => left - right);
+
+    if (!sorted.length) return 0;
+
+    const mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 0) {
+      return Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+    }
+    return sorted[mid];
+  }, [transactionRows]);
+
+  const highVelocitySignals = useMemo(() => {
+    const now = Date.now();
+    const windowStart = now - 30 * 60 * 1000;
+
+    return transactionRows.filter(
+      (transaction) =>
+        new Date(transaction.timestamp).getTime() >= windowStart &&
+        transaction.risk_score >= 70,
+    ).length;
+  }, [transactionRows]);
+
+  const avgAlertAgeMinutes = useMemo(() => {
+    if (!alertRows.length) return 0;
+
+    const now = Date.now();
+    const totalAgeMs = alertRows.reduce((sum, alert) => {
+      const createdAt = new Date(alert.timestamp).getTime();
+      if (Number.isNaN(createdAt)) return sum;
+      return sum + Math.max(0, now - createdAt);
+    }, 0);
+
+    return Math.round(totalAgeMs / Math.max(alertRows.length, 1) / 60000);
+  }, [alertRows]);
 
   const riskTrend = useMemo(
     () =>
@@ -223,6 +280,79 @@ export default function AnalystDashboard() {
         volumeLakh: Math.max(1, Math.round(transaction.amount / 100000)),
       }));
   }, [transactionRows]);
+
+  const alertsByHour = useMemo(() => {
+    const bins = Array.from({ length: 8 }, (_, index) => {
+      const start = index * 3;
+      const end = start + 2;
+      return {
+        slot: `${String(start).padStart(2, "0")}-${String(end).padStart(2, "0")}`,
+        total: 0,
+        critical: 0,
+        high: 0,
+      };
+    });
+
+    for (const alert of alertRows) {
+      const hour = new Date(alert.timestamp).getHours();
+      if (!Number.isFinite(hour)) continue;
+
+      const bucket = Math.max(0, Math.min(7, Math.floor(hour / 3)));
+      bins[bucket].total += 1;
+      if (alert.severity === "critical") {
+        bins[bucket].critical += 1;
+      } else if (alert.severity === "high") {
+        bins[bucket].high += 1;
+      }
+    }
+
+    return bins;
+  }, [alertRows]);
+
+  const riskBandDistribution = useMemo(() => {
+    const bands = [
+      { band: "0-39", count: 0, fill: "hsl(142, 72%, 45%)" },
+      { band: "40-59", count: 0, fill: "hsl(205, 75%, 52%)" },
+      { band: "60-79", count: 0, fill: "hsl(38, 92%, 50%)" },
+      { band: "80-100", count: 0, fill: "hsl(0, 72%, 51%)" },
+    ];
+
+    for (const transaction of transactionRows) {
+      const risk = transaction.risk_score;
+      if (risk < 40) bands[0].count += 1;
+      else if (risk < 60) bands[1].count += 1;
+      else if (risk < 80) bands[2].count += 1;
+      else bands[3].count += 1;
+    }
+
+    return bands;
+  }, [transactionRows]);
+
+  const confidenceParity = useMemo(() => {
+    const order = ["critical", "high", "medium", "low"] as const;
+    const tallies = new Map<string, { model: number; rules: number; count: number }>();
+
+    for (const severity of order) {
+      tallies.set(severity, { model: 0, rules: 0, count: 0 });
+    }
+
+    for (const alert of alertRows) {
+      const row = tallies.get(alert.severity) ?? { model: 0, rules: 0, count: 0 };
+      row.model += (alert.model_confidence ?? 0) * 100;
+      row.rules += (alert.rule_confidence ?? 0) * 100;
+      row.count += 1;
+      tallies.set(alert.severity, row);
+    }
+
+    return order.map((severity) => {
+      const row = tallies.get(severity) ?? { model: 0, rules: 0, count: 0 };
+      return {
+        severity: severity.toUpperCase(),
+        model: Math.round(row.model / Math.max(row.count, 1)),
+        rules: Math.round(row.rules / Math.max(row.count, 1)),
+      };
+    });
+  }, [alertRows]);
 
   const institutionRiskMatrix = useMemo(() => {
     const map = new Map<
@@ -390,6 +520,42 @@ export default function AnalystDashboard() {
       </SectionReveal>
 
       <SectionReveal>
+        <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
+          <div className="glass rounded-xl p-4 border border-border/70">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Median Risk</p>
+            <p className="text-lg font-bold mt-1">{medianRisk}</p>
+            <p className="text-[11px] text-muted-foreground mt-1 inline-flex items-center gap-1">
+              <Gauge className="w-3.5 h-3.5" /> Stable centerline of incoming risk
+            </p>
+          </div>
+          <div className="glass rounded-xl p-4 border border-border/70">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Escalation Rate</p>
+            <p className="text-lg font-bold mt-1">{escalationRate}%</p>
+            <p className="text-[11px] text-muted-foreground mt-1 inline-flex items-center gap-1">
+              <Siren className="w-3.5 h-3.5" /> High + critical share of queue
+            </p>
+          </div>
+          <div className="glass rounded-xl p-4 border border-border/70">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Model vs Rules Gap</p>
+            <p className="text-lg font-bold mt-1">
+              {modelRuleGap >= 0 ? "+" : ""}
+              {modelRuleGap} pts
+            </p>
+            <p className="text-[11px] text-muted-foreground mt-1 inline-flex items-center gap-1">
+              <TrendingUp className="w-3.5 h-3.5" /> Model {avgModelConfidence}% vs Rules {avgRuleConfidence}%
+            </p>
+          </div>
+          <div className="glass rounded-xl p-4 border border-border/70">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">30m Velocity Signals</p>
+            <p className="text-lg font-bold mt-1">{highVelocitySignals}</p>
+            <p className="text-[11px] text-muted-foreground mt-1 inline-flex items-center gap-1">
+              <Zap className="w-3.5 h-3.5" /> Avg alert age {avgAlertAgeMinutes} min
+            </p>
+          </div>
+        </div>
+      </SectionReveal>
+
+      <SectionReveal>
         <div className="grid xl:grid-cols-3 gap-4">
           <div className="glass rounded-xl p-5 border border-border/70 xl:col-span-2">
             <h3 className="text-sm font-semibold mb-3">Risk and Volume Timeline</h3>
@@ -498,6 +664,88 @@ export default function AnalystDashboard() {
             {!institutionRiskMatrix.length ? (
               <p className="text-xs text-muted-foreground">No institution metrics available from backend.</p>
             ) : null}
+          </div>
+        </div>
+      </SectionReveal>
+
+      <SectionReveal>
+        <div className="grid xl:grid-cols-3 gap-4">
+          <div className="glass rounded-xl p-5 border border-border/70">
+            <h3 className="text-sm font-semibold mb-3">Alert Pressure by Hour</h3>
+            <ResponsiveContainer width="100%" height={230}>
+              <AreaChart data={alertsByHour}>
+                <defs>
+                  <linearGradient id="analystAlertTotal" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="hsl(205, 75%, 52%)" stopOpacity={0.35} />
+                    <stop offset="95%" stopColor="hsl(205, 75%, 52%)" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 16%, 14%)" />
+                <XAxis dataKey="slot" stroke="hsl(220, 10%, 50%)" fontSize={11} />
+                <YAxis stroke="hsl(220, 10%, 50%)" fontSize={11} />
+                <Tooltip
+                  contentStyle={{
+                    background: "hsl(220, 18%, 8%)",
+                    border: "1px solid hsl(220, 16%, 14%)",
+                    borderRadius: 8,
+                    fontSize: 12,
+                  }}
+                />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Area type="monotone" dataKey="total" stroke="hsl(205, 75%, 52%)" fill="url(#analystAlertTotal)" strokeWidth={2} name="Total Alerts" />
+                <Line type="monotone" dataKey="critical" stroke="hsl(0, 72%, 51%)" strokeWidth={2} dot={false} name="Critical" />
+                <Line type="monotone" dataKey="high" stroke="hsl(38, 92%, 50%)" strokeWidth={2} dot={false} name="High" />
+              </AreaChart>
+            </ResponsiveContainer>
+            <p className="text-[11px] text-muted-foreground mt-2">3-hour bins from live alert timestamps.</p>
+          </div>
+
+          <div className="glass rounded-xl p-5 border border-border/70">
+            <h3 className="text-sm font-semibold mb-3">Risk Band Distribution</h3>
+            <ResponsiveContainer width="100%" height={230}>
+              <BarChart data={riskBandDistribution}>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 16%, 14%)" />
+                <XAxis dataKey="band" stroke="hsl(220, 10%, 50%)" fontSize={11} />
+                <YAxis stroke="hsl(220, 10%, 50%)" fontSize={11} />
+                <Tooltip
+                  contentStyle={{
+                    background: "hsl(220, 18%, 8%)",
+                    border: "1px solid hsl(220, 16%, 14%)",
+                    borderRadius: 8,
+                    fontSize: 12,
+                  }}
+                />
+                <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                  {riskBandDistribution.map((entry) => (
+                    <Cell key={entry.band} fill={entry.fill} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+            <p className="text-[11px] text-muted-foreground mt-2">Spread of transaction risk buckets in analyst scope.</p>
+          </div>
+
+          <div className="glass rounded-xl p-5 border border-border/70">
+            <h3 className="text-sm font-semibold mb-3">Confidence Parity by Severity</h3>
+            <ResponsiveContainer width="100%" height={230}>
+              <LineChart data={confidenceParity}>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 16%, 14%)" />
+                <XAxis dataKey="severity" stroke="hsl(220, 10%, 50%)" fontSize={11} />
+                <YAxis domain={[0, 100]} stroke="hsl(220, 10%, 50%)" fontSize={11} />
+                <Tooltip
+                  contentStyle={{
+                    background: "hsl(220, 18%, 8%)",
+                    border: "1px solid hsl(220, 16%, 14%)",
+                    borderRadius: 8,
+                    fontSize: 12,
+                  }}
+                />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Line type="monotone" dataKey="model" stroke="hsl(205, 75%, 52%)" strokeWidth={2} name="Model %" />
+                <Line type="monotone" dataKey="rules" stroke="hsl(38, 92%, 50%)" strokeWidth={2} name="Rules %" />
+              </LineChart>
+            </ResponsiveContainer>
+            <p className="text-[11px] text-muted-foreground mt-2">Helps analysts compare model and rule explainability confidence.</p>
           </div>
         </div>
       </SectionReveal>
