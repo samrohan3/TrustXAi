@@ -281,6 +281,33 @@ class ErrorResponse(BaseModel):
     detail: str
 
 
+class ModelPipelineCatalog(BaseModel):
+    pipelines: list[str]
+
+
+class ModelTrainingResult(BaseModel):
+    pipeline: str
+    dataset: str
+    model_type: str
+    status: str
+    rows: int
+    metrics: dict[str, Any]
+    outputs: dict[str, Any]
+    artifacts: list[str]
+    notes: list[str]
+
+
+class ModelTrainingRunRead(BaseModel):
+    run_id: str
+    started_at: datetime
+    completed_at: datetime
+    duration_seconds: float
+    requested_pipelines: list[str]
+    succeeded: int
+    failed: int
+    results: list[ModelTrainingResult]
+
+
 class QuerySummary(BaseModel):
     filters: dict[str, Any]
     total: int

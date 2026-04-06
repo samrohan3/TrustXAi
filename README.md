@@ -109,23 +109,37 @@ src/
 npm install
 ```
 
-### 2. Start development server
+### 2. Configure frontend API base URL
+
+```bash
+copy .env.example .env
+```
+
+Set `VITE_API_BASE_URL` in `.env` to your backend URL (default local value points to `http://127.0.0.1:8000/api/v1`).
+
+### 3. Start development server
 
 ```bash
 npm run dev
 ```
 
-### 3. Build for production
+### 4. Build for production
 
 ```bash
 npm run build
 ```
 
-### 4. Preview production build
+### 5. Preview production build
 
 ```bash
 npm run preview
 ```
+
+Live backend wiring notes:
+
+- Login now attempts backend JWT auth first and falls back to demo-mode only when backend is unreachable.
+- Federated Learning dashboard pulls `/federated-learning/*` endpoints and can trigger `/ml/train/all`.
+- Fraud Intelligence dashboard shows latest `/ml/train/runs` pipeline outputs (AML alerts, entity links, layering signals).
 
 ## Available Scripts
 

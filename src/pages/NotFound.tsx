@@ -74,6 +74,7 @@ const NotFound = () => {
               title="Route Recovery Telemetry"
               subtitle="Live diagnostics for unresolved navigation paths"
               variant="recovery"
+              chartType="scatter"
               chartPlacement="left"
               metrics={[
                 {

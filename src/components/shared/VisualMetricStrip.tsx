@@ -1,12 +1,23 @@
-import { useId } from "react";
 import { motion } from "framer-motion";
 import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
-  Area,
-  AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
+  Cell,
+  Pie,
+  PieChart,
+  PolarAngleAxis,
+  PolarGrid,
+  PolarRadiusAxis,
+  Radar,
+  RadarChart,
+  RadialBar,
+  RadialBarChart,
   ResponsiveContainer,
+  Scatter,
+  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
@@ -38,6 +49,8 @@ export type VisualMetricStripVariant =
   | "auth"
   | "recovery";
 
+export type VisualMetricChartType = "bar" | "radar" | "donut" | "radial" | "scatter";
+
 interface VisualMetricStripProps {
   title: string;
   subtitle: string;
@@ -47,6 +60,7 @@ interface VisualMetricStripProps {
   chartColor?: string;
   badges?: string[];
   variant?: VisualMetricStripVariant;
+  chartType?: VisualMetricChartType;
   chartPlacement?: "left" | "right";
 }
 
@@ -171,6 +185,40 @@ const variantStyles: Record<
   },
 };
 
+const variantChartTypes: Record<VisualMetricStripVariant, VisualMetricChartType> = {
+  default: "bar",
+  pulse: "bar",
+  risk: "radar",
+  chain: "scatter",
+  federation: "radial",
+  governance: "radar",
+  settings: "donut",
+  investigation: "donut",
+  landing: "bar",
+  auth: "radial",
+  recovery: "scatter",
+};
+
+const defaultChartPalette = [
+  "hsl(210, 100%, 60%)",
+  "hsl(142, 72%, 45%)",
+  "hsl(48, 96%, 53%)",
+  "hsl(0, 72%, 51%)",
+  "hsl(190, 95%, 45%)",
+];
+
+function withAlpha(color: string, alpha: number): string {
+  if (color.startsWith("hsl(")) {
+    return color.replace("hsl(", "hsla(").replace(")", `, ${alpha})`);
+  }
+
+  if (color.startsWith("rgb(")) {
+    return color.replace("rgb(", "rgba(").replace(")", `, ${alpha})`);
+  }
+
+  return color;
+}
+
 export default function VisualMetricStrip({
   title,
   subtitle,
@@ -180,11 +228,104 @@ export default function VisualMetricStrip({
   chartColor,
   badges = [],
   variant = "default",
+  chartType,
   chartPlacement = "right",
 }: VisualMetricStripProps) {
   const styles = variantStyles[variant];
   const resolvedChartColor = chartColor ?? styles.chartColor;
-  const gradientId = `trend-gradient-${useId().replace(/:/g, "")}`;
+  const resolvedChartType = chartType ?? variantChartTypes[variant];
+  const chartDataPoints = chartData.length ? chartData : [{ label: "N/A", value: 0 }];
+  const chartPalette = [resolvedChartColor, ...defaultChartPalette].filter(
+    (color, index, colors) => colors.indexOf(color) === index,
+  );
+  const polarData = chartDataPoints.map((point, index) => ({
+    ...point,
+    fill: chartPalette[index % chartPalette.length],
+  }));
+  const scatterData = chartDataPoints.map((point, index) => ({
+    x: index + 1,
+    y: point.value,
+    label: point.label,
+  }));
+  const radarFill = withAlpha(resolvedChartColor, 0.35);
+  const axisTick = { fontSize: 10, fill: "hsl(220, 10%, 50%)" };
+  const tooltipStyle = {
+    background: "hsl(220, 18%, 8%)",
+    border: "1px solid hsl(220, 16%, 14%)",
+    borderRadius: 8,
+    fontSize: 11,
+  };
+
+  const renderChart = () => {
+    switch (resolvedChartType) {
+      case "radar":
+        return (
+          <RadarChart data={chartDataPoints}>
+            <PolarGrid stroke="hsl(220, 16%, 14%)" />
+            <PolarAngleAxis dataKey="label" tick={{ fontSize: 9, fill: "hsl(220, 10%, 50%)" }} />
+            <PolarRadiusAxis tick={false} axisLine={false} />
+            <Tooltip contentStyle={tooltipStyle} />
+            <Radar dataKey="value" stroke={resolvedChartColor} fill={radarFill} fillOpacity={1} />
+          </RadarChart>
+        );
+      case "donut":
+        return (
+          <PieChart>
+            <Tooltip contentStyle={tooltipStyle} />
+            <Pie
+              data={chartDataPoints}
+              dataKey="value"
+              nameKey="label"
+              cx="50%"
+              cy="50%"
+              innerRadius={34}
+              outerRadius={56}
+              paddingAngle={2}
+              stroke="transparent"
+            >
+              {chartDataPoints.map((point, index) => (
+                <Cell key={`${point.label}-${index}`} fill={chartPalette[index % chartPalette.length]} />
+              ))}
+            </Pie>
+          </PieChart>
+        );
+      case "radial":
+        return (
+          <RadialBarChart
+            data={polarData}
+            innerRadius="22%"
+            outerRadius="90%"
+            startAngle={180}
+            endAngle={-180}
+            barSize={10}
+          >
+            <Tooltip contentStyle={tooltipStyle} />
+            <RadialBar background dataKey="value" cornerRadius={8} />
+          </RadialBarChart>
+        );
+      case "scatter":
+        return (
+          <ScatterChart margin={{ left: -10, right: 8, top: 4, bottom: -4 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 16%, 14%)" vertical={false} />
+            <XAxis type="number" dataKey="x" hide />
+            <YAxis type="number" dataKey="y" tick={axisTick} axisLine={false} tickLine={false} width={28} />
+            <Tooltip contentStyle={tooltipStyle} cursor={{ stroke: resolvedChartColor, strokeDasharray: "3 3" }} />
+            <Scatter data={scatterData} fill={resolvedChartColor} name={chartLabel} />
+          </ScatterChart>
+        );
+      case "bar":
+      default:
+        return (
+          <BarChart data={chartDataPoints} margin={{ left: -12, right: 6, top: 4, bottom: -4 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 16%, 14%)" vertical={false} />
+            <XAxis dataKey="label" tick={axisTick} axisLine={false} tickLine={false} />
+            <YAxis hide domain={["dataMin - 2", "dataMax + 2"]} />
+            <Tooltip contentStyle={tooltipStyle} />
+            <Bar dataKey="value" fill={resolvedChartColor} radius={[4, 4, 0, 0]} />
+          </BarChart>
+        );
+    }
+  };
 
   const chartPanel = (
     <div className={cn("rounded-xl p-3", styles.chartPanel)}>
@@ -193,26 +334,7 @@ export default function VisualMetricStrip({
         <div className="w-2 h-2 rounded-full" style={{ background: resolvedChartColor }} />
       </div>
       <ResponsiveContainer width="100%" height={140}>
-        <AreaChart data={chartData} margin={{ left: -12, right: 6, top: 4, bottom: -4 }}>
-          <defs>
-            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor={resolvedChartColor} stopOpacity={0.32} />
-              <stop offset="95%" stopColor={resolvedChartColor} stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 16%, 14%)" vertical={false} />
-          <XAxis dataKey="label" tick={{ fontSize: 10, fill: "hsl(220, 10%, 50%)" }} axisLine={false} tickLine={false} />
-          <YAxis hide domain={["dataMin - 2", "dataMax + 2"]} />
-          <Tooltip
-            contentStyle={{
-              background: "hsl(220, 18%, 8%)",
-              border: "1px solid hsl(220, 16%, 14%)",
-              borderRadius: 8,
-              fontSize: 11,
-            }}
-          />
-          <Area type="monotone" dataKey="value" stroke={resolvedChartColor} strokeWidth={2} fill={`url(#${gradientId})`} />
-        </AreaChart>
+        {renderChart()}
       </ResponsiveContainer>
     </div>
   );

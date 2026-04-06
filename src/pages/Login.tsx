@@ -108,6 +108,7 @@ export default function Login() {
               title="Identity Access Telemetry"
               subtitle="Real-time authentication assurance across connected institutions"
               variant="auth"
+              chartType="radial"
               chartPlacement="right"
               metrics={[
                 {

@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     MONGODB_URL: str = "mongodb://localhost:27017"
     MONGODB_DB_NAME: str = "trustxai"
     CORS_ORIGINS: str = "http://localhost:8080,http://localhost:8081,http://127.0.0.1:8080,http://127.0.0.1:8081"
+    DATA_DIR: str = "data"
+    MODEL_ARTIFACTS_DIR: str = "backend/model_artifacts"
+    MAX_TRAINING_ROWS: int = 0
 
     model_config = SettingsConfigDict(
         env_file=".env",

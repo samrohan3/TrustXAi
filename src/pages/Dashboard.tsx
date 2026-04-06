@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import {
   ShieldAlert, TrendingDown, Activity, Zap, AlertTriangle, Radio, Pause, Play,
+  type LucideIcon,
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -37,7 +38,7 @@ const severityColor: Record<string, string> = {
 };
 
 function AnimatedStat({ icon: Icon, label, targetValue, displayValue, change, changeType = "neutral", delay = 0 }: {
-  icon: any; label: string; targetValue: number; displayValue: (v: number) => string; change: string; changeType?: string; delay?: number;
+  icon: LucideIcon; label: string; targetValue: number; displayValue: (v: number) => string; change: string; changeType?: string; delay?: number;
 }) {
   const count = useAnimatedCounter(targetValue, 1800, delay * 1000);
   return (
@@ -103,6 +104,7 @@ export default function Dashboard() {
           title="Live Operations Pulse"
           subtitle="High-frequency platform telemetry for fraud response and transaction surveillance"
           variant="pulse"
+          chartType="bar"
           chartPlacement="right"
           metrics={[
             {

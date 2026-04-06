@@ -7,3 +7,10 @@ passlib==1.7.4
 pydantic-settings==2.7.0
 email-validator==2.2.0
 python-multipart==0.0.20
+pandas==2.2.3
+numpy==2.2.1
+scikit-learn==1.5.2
+networkx==3.4.2
+statsmodels==0.14.4
+joblib==1.4.2
+xgboost==2.1.4

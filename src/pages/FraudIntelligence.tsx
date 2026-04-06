@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Fingerprint,
@@ -7,11 +7,13 @@ import {
   Network,
   Clock,
   AlertTriangle,
+  Loader,
   X,
   Target,
   ScanSearch,
   Link2,
   ListTree,
+  RotateCcw,
 } from "lucide-react";
 import {
   AreaChart,
@@ -28,12 +30,23 @@ import {
   PolarRadiusAxis,
 } from "recharts";
 import SectionReveal from "@/components/shared/SectionReveal";
-import { fraudDNAs, transactions, type FraudDNA } from "@/data/mockData";
+import { useAuth } from "@/contexts/AuthContext";
 import {
-  investigationCases,
-  investigationCaseOptions,
+  fraudDNAs as fallbackFraudDNAs,
+  transactions as fallbackTransactions,
+  type FraudDNA,
+  type Transaction,
+} from "@/data/mockData";
+import {
+  investigationCases as fallbackInvestigationCases,
+  investigationCaseOptions as fallbackInvestigationCaseOptions,
   mergeInvestigationCases,
   type DetectionLabel,
+  type MergedInvestigationData,
+  type InvestigationCase,
+  type InvestigationNode,
+  type InvestigationEdge,
+  type InvestigationPathRisk,
 } from "@/data/investigationData";
 import { useAnimatedCounter } from "@/hooks/useAnimatedCounter";
 import MoneyTrailSpiderMap from "@/components/fraud-intel/MoneyTrailSpiderMap";
@@ -41,9 +54,25 @@ import EntityFilterPanel, {
   type InvestigationFilters,
   type ResolutionHint,
 } from "@/components/fraud-intel/EntityFilterPanel";
-import CaseLinkingPanel from "@/components/fraud-intel/CaseLinkingPanel";
+import CaseLinkingPanel, { type CaseOption } from "@/components/fraud-intel/CaseLinkingPanel";
 import MoneyFlowTimeline from "@/components/fraud-intel/MoneyFlowTimeline";
 import InvestigationReportGenerator from "@/components/fraud-intel/InvestigationReportGenerator";
+import {
+  fetchAllTransactions,
+  fetchFraudDNA,
+  fetchInvestigationCaseOptions,
+  fetchMergedInvestigation,
+  fetchMlTrainingRuns,
+  type BackendFraudDNA,
+  type BackendInvestigationCase,
+  type BackendInvestigationCaseOption,
+  type BackendInvestigationEdge,
+  type BackendInvestigationMergedResponse,
+  type BackendInvestigationNode,
+  type BackendInvestigationPathRisk,
+  type BackendTransaction,
+  type MlTrainingRun,
+} from "@/lib/backendApi";
 import VisualMetricStrip from "@/components/shared/VisualMetricStrip";
 
 const catColor: Record<string, string> = {
@@ -104,26 +133,311 @@ const layerLabel = (layer: number) => {
   return `Layer ${layer}`;
 };
 
+const asNumber = (value: unknown, fallback = 0): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const normalizeStatus = (status: string): Transaction["status"] => {
+  if (status === "approved" || status === "blocked" || status === "flagged" || status === "pending") {
+    return status;
+  }
+  return "flagged";
+};
+
+const mapBackendTransaction = (row: BackendTransaction): Transaction => ({
+  id: row.id,
+  from: row.from_account,
+  to: row.to_account,
+  amount: row.amount,
+  currency: row.currency,
+  timestamp: row.timestamp,
+  riskScore: row.risk_score,
+  status: normalizeStatus(row.status),
+  type: row.type,
+  institution: row.institution,
+});
+
+const mapBackendFraudDNA = (row: BackendFraudDNA): FraudDNA => ({
+  id: row.id,
+  hash: row.hash,
+  pattern: row.pattern,
+  similarity: row.similarity,
+  detectedAt: row.detected_at,
+  source: row.source,
+  category: row.category,
+});
+
+const toDetectionLabel = (value: string): DetectionLabel => {
+  if (value === "Layering Detected") return "Layering Detected";
+  if (value === "Smurfing Pattern") return "Smurfing Pattern";
+  if (value === "Circular Flow") return "Circular Flow";
+  if (value === "Velocity Stacking") return "Velocity Stacking";
+  return "Layering Detected";
+};
+
+const mapInvestigationNode = (node: BackendInvestigationNode): InvestigationNode => ({
+  id: node.id,
+  label: node.label,
+  nodeType:
+    node.node_type === "bank-account" || node.node_type === "wallet" || node.node_type === "entity"
+      ? node.node_type
+      : "entity",
+  role:
+    node.role === "source" || node.role === "intermediate" || node.role === "destination"
+      ? node.role
+      : "intermediate",
+  defaultLayer: node.default_layer,
+  riskScore: node.risk_score,
+  holderName: node.holder_name,
+  phone: node.phone,
+  ipAddress: node.ip_address,
+  email: node.email,
+  bankName: node.bank_name,
+});
+
+const mapInvestigationEdge = (edge: BackendInvestigationEdge): InvestigationEdge => ({
+  id: edge.id,
+  from: edge.from_node_id,
+  to: edge.to_node_id,
+  amount: edge.amount,
+  currency: edge.currency,
+  timestamp: edge.timestamp,
+  txRef: edge.tx_ref,
+});
+
+const mapInvestigationPathRisk = (risk: BackendInvestigationPathRisk): InvestigationPathRisk => ({
+  id: risk.id,
+  label: toDetectionLabel(risk.label),
+  riskScore: risk.risk_score,
+  chain: risk.chain,
+  explanation: risk.explanation,
+});
+
+const mapInvestigationCase = (entry: BackendInvestigationCase): InvestigationCase => ({
+  caseId: entry.case_id,
+  title: entry.title,
+  leadAgency: entry.lead_agency,
+  sourceNodeId: entry.source_node_id,
+  destinationNodeIds: entry.destination_node_ids,
+  nodes: entry.nodes.map(mapInvestigationNode),
+  edges: entry.edges.map(mapInvestigationEdge),
+  pathRisks: entry.path_risks.map(mapInvestigationPathRisk),
+});
+
+const mapMergedInvestigation = (
+  response: BackendInvestigationMergedResponse,
+): MergedInvestigationData => ({
+  selectedCases: response.selected_cases.map(mapInvestigationCase),
+  nodes: response.nodes.map(mapInvestigationNode),
+  edges: response.edges.map(mapInvestigationEdge),
+  sourceNodeIds: response.source_node_ids,
+  destinationNodeIds: response.destination_node_ids,
+  pathRisks: response.path_risks.map(mapInvestigationPathRisk),
+  commonNodeIds: response.common_node_ids,
+  sharedPatternLabels: response.shared_pattern_labels.map(toDetectionLabel),
+});
+
+const mapCaseOption = (option: BackendInvestigationCaseOption): CaseOption => ({
+  caseId: option.case_id,
+  title: option.title,
+  leadAgency: option.lead_agency,
+});
+
+const isSameCaseSelection = (left: string[], right: string[]) =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
 export default function FraudIntelligence() {
+  const { authToken } = useAuth();
   const [selectedDNA, setSelectedDNA] = useState<FraudDNA | null>(null);
   const [activeTab, setActiveTab] = useState<"patterns" | "network" | "timeline">("patterns");
   const [investigationMode, setInvestigationMode] = useState(false);
   const [selectedCaseIds, setSelectedCaseIds] = useState<string[]>([
-    investigationCases[0]?.caseId ?? "",
+    fallbackInvestigationCases[0]?.caseId ?? "",
   ]);
   const [filters, setFilters] = useState<InvestigationFilters>(defaultFilters);
   const [collapsedLayers, setCollapsedLayers] = useState<number[]>([]);
   const [timelineStep, setTimelineStep] = useState(1);
   const [bankAccountOnly, setBankAccountOnly] = useState(false);
+  const [fraudDnaRows, setFraudDnaRows] = useState<FraudDNA[] | null>(null);
+  const [investigationOptionsRows, setInvestigationOptionsRows] = useState<CaseOption[] | null>(null);
+  const [mergedInvestigationRows, setMergedInvestigationRows] = useState<MergedInvestigationData | null>(null);
+  const [transactionRows, setTransactionRows] = useState<Transaction[] | null>(null);
+  const [intelSyncLoading, setIntelSyncLoading] = useState(false);
+  const [intelSyncMessage, setIntelSyncMessage] = useState<string | null>(null);
+  const [latestTrainingRun, setLatestTrainingRun] = useState<MlTrainingRun | null>(null);
+  const [mlSyncError, setMlSyncError] = useState<string | null>(null);
+  const [mlSyncLoading, setMlSyncLoading] = useState(false);
 
-  const totalPatterns = useAnimatedCounter(fraudDNAs.length, 800);
-  const avgSimilarity = useAnimatedCounter(92, 1200, 200);
+  const fraudDNAData = fraudDnaRows ?? fallbackFraudDNAs;
+  const caseOptions = investigationOptionsRows ?? fallbackInvestigationCaseOptions;
+  const transactionData = transactionRows ?? fallbackTransactions;
+
+  const avgSimilarityValue = Math.round(
+    fraudDNAData.reduce((sum, entry) => sum + entry.similarity, 0) / Math.max(fraudDNAData.length, 1),
+  );
+
+  const totalPatterns = useAnimatedCounter(fraudDNAData.length, 800);
+  const avgSimilarity = useAnimatedCounter(avgSimilarityValue, 1200, 200);
   const activeThreats = useAnimatedCounter(19, 1000, 300);
 
-  const mergedInvestigation = useMemo(
+  const syncInvestigationWorkspace = useCallback(async () => {
+    if (!authToken) {
+      setFraudDnaRows(null);
+      setInvestigationOptionsRows(null);
+      setMergedInvestigationRows(null);
+      setTransactionRows(null);
+      setIntelSyncMessage("Backend auth token unavailable. Showing local investigation dataset.");
+      return;
+    }
+
+    setIntelSyncLoading(true);
+    setIntelSyncMessage("Syncing fraud intelligence from MongoDB...");
+
+    try {
+      const [dnaRows, caseOptionRows, transactionResults] = await Promise.all([
+        fetchFraudDNA(),
+        fetchInvestigationCaseOptions(),
+        fetchAllTransactions({
+          sortBy: "timestamp",
+          sortDir: "desc",
+          maxRecords: 20000,
+        }),
+      ]);
+
+      const mappedDna = dnaRows.map(mapBackendFraudDNA);
+      const mappedCaseOptions = caseOptionRows.map(mapCaseOption);
+      const mappedTransactions = transactionResults.map(mapBackendTransaction);
+
+      setFraudDnaRows(mappedDna);
+      setInvestigationOptionsRows(mappedCaseOptions);
+      setTransactionRows(mappedTransactions);
+
+      setIntelSyncMessage(
+        `Loaded ${mappedDna.length} DNA signatures, ${mappedCaseOptions.length} cases, and ${mappedTransactions.length.toLocaleString()} transactions from MongoDB.`,
+      );
+    } catch (error) {
+      const detail =
+        error instanceof Error ? error.message : "Failed to load backend fraud-intelligence data.";
+      setFraudDnaRows(null);
+      setInvestigationOptionsRows(null);
+      setMergedInvestigationRows(null);
+      setTransactionRows(null);
+      setIntelSyncMessage(`${detail} Falling back to local investigation dataset.`);
+    } finally {
+      setIntelSyncLoading(false);
+    }
+  }, [authToken]);
+
+  useEffect(() => {
+    void syncInvestigationWorkspace();
+  }, [syncInvestigationWorkspace]);
+
+  useEffect(() => {
+    if (!caseOptions.length) {
+      setSelectedCaseIds([]);
+      return;
+    }
+
+    setSelectedCaseIds((previous) => {
+      const valid = previous.filter((caseId) => caseOptions.some((option) => option.caseId === caseId));
+      const next = valid.length ? valid : [caseOptions[0].caseId];
+      return isSameCaseSelection(previous, next) ? previous : next;
+    });
+  }, [caseOptions]);
+
+  useEffect(() => {
+    if (!authToken) {
+      setMergedInvestigationRows(null);
+      return;
+    }
+
+    const normalizedCaseIds = selectedCaseIds.filter(Boolean);
+    if (!normalizedCaseIds.length) {
+      setMergedInvestigationRows(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadMergedInvestigation = async () => {
+      try {
+        const merged = await fetchMergedInvestigation(normalizedCaseIds);
+        if (!cancelled) {
+          setMergedInvestigationRows(mapMergedInvestigation(merged));
+        }
+      } catch {
+        if (!cancelled) {
+          setMergedInvestigationRows(null);
+        }
+      }
+    };
+
+    void loadMergedInvestigation();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken, selectedCaseIds]);
+
+  useEffect(() => {
+    if (!authToken) {
+      setLatestTrainingRun(null);
+      setMlSyncError("Sign in with backend auth to view live ML outputs.");
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadLatestTrainingRun = async () => {
+      setMlSyncLoading(true);
+      setMlSyncError(null);
+      try {
+        const runs = await fetchMlTrainingRuns(1);
+        if (!cancelled) {
+          setLatestTrainingRun(runs[0] ?? null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setMlSyncError(error instanceof Error ? error.message : "Failed to load ML training output.");
+        }
+      } finally {
+        if (!cancelled) {
+          setMlSyncLoading(false);
+        }
+      }
+    };
+
+    void loadLatestTrainingRun();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authToken]);
+
+  const pipelineResults = useMemo(() => {
+    const resultMap = new Map<string, MlTrainingRun["results"][number]>();
+    for (const result of latestTrainingRun?.results ?? []) {
+      resultMap.set(result.pipeline, result);
+    }
+    return resultMap;
+  }, [latestTrainingRun]);
+
+  const amlAlertCount = asNumber(pipelineResults.get("aml_patterns")?.metrics?.total_alerts);
+  const linkedPairCount = asNumber(pipelineResults.get("entities")?.metrics?.linked_pair_count);
+  const suspiciousNodeCount = asNumber(
+    pipelineResults.get("layered_transactions")?.metrics?.suspicious_node_count,
+  );
+  const advancedAuc = asNumber(
+    pipelineResults.get("fraud_detection_financial")?.metrics?.best_auc,
+  );
+
+  const fallbackMergedInvestigation = useMemo(
     () => mergeInvestigationCases(selectedCaseIds.filter(Boolean)),
     [selectedCaseIds],
   );
+
+  const mergedInvestigation = mergedInvestigationRows ?? fallbackMergedInvestigation;
 
   const nodeLookup = useMemo(
     () => Object.fromEntries(mergedInvestigation.nodes.map((node) => [node.id, node])),
@@ -427,11 +741,11 @@ export default function FraudIntelligence() {
 
   const linkedTransactions = useMemo(() => {
     const refs = new Set(mergedInvestigation.edges.map((edge) => edge.txRef));
-    return transactions
+    return transactionData
       .filter((tx) => refs.has(tx.id))
       .sort((a, b) => b.riskScore - a.riskScore)
       .slice(0, 6);
-  }, [mergedInvestigation.edges]);
+  }, [mergedInvestigation.edges, transactionData]);
 
   const aiDetectionSummary = useMemo(
     () =>
@@ -462,7 +776,7 @@ export default function FraudIntelligence() {
 
   const updateCases = (caseIds: string[]) => {
     if (!caseIds.length) {
-      const fallback = investigationCases[0]?.caseId;
+      const fallback = caseOptions[0]?.caseId;
       setSelectedCaseIds(fallback ? [fallback] : []);
       return;
     }
@@ -486,6 +800,11 @@ export default function FraudIntelligence() {
           <p className="text-sm text-muted-foreground mt-1">
             Law-enforcement-ready workspace for layered account tracing, inter-case spider maps, and source-to-destination money trail analysis
           </p>
+          {intelSyncMessage ? (
+            <p className="text-[11px] text-muted-foreground mt-1.5">
+              Data Source: {fraudDnaRows ? "MongoDB" : "Local Fallback"} • {intelSyncMessage}
+            </p>
+          ) : null}
         </div>
 
         <div className="glass rounded-xl p-3 w-full sm:w-auto">
@@ -514,6 +833,15 @@ export default function FraudIntelligence() {
               ? "Full graph access, deep tracing, and case linking enabled"
               : "Reduced tracing mode for standard bank operations"}
           </p>
+          <button
+            type="button"
+            onClick={() => void syncInvestigationWorkspace()}
+            disabled={intelSyncLoading}
+            className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-secondary px-2 py-1 text-[10px] font-semibold text-muted-foreground hover:text-foreground disabled:cursor-not-allowed"
+          >
+            <RotateCcw className={`h-3 w-3 ${intelSyncLoading ? "animate-spin" : ""}`} />
+            {intelSyncLoading ? "Syncing" : "Sync MongoDB"}
+          </button>
         </div>
       </div>
 
@@ -522,6 +850,7 @@ export default function FraudIntelligence() {
           title="Investigation Intelligence Pulse"
           subtitle="Layered case telemetry across spider maps, identity linking, and source to destination movement"
           variant="investigation"
+          chartType="donut"
           chartPlacement="right"
           metrics={[
             {
@@ -569,6 +898,81 @@ export default function FraudIntelligence() {
             `Linked Identity Score: ${linkedIdentityScore}%`,
           ]}
         />
+      </SectionReveal>
+
+      <SectionReveal>
+        <div className="glass rounded-xl p-4 border border-primary/20">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold">Live Backend ML Output</h3>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Snapshot from latest /ml/train/runs result for AML, layering, and entity-linking intelligence.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-[10px] font-semibold">
+              {mlSyncLoading ? (
+                <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-secondary text-muted-foreground">
+                  <Loader className="w-3 h-3 animate-spin" /> Syncing
+                </span>
+              ) : latestTrainingRun ? (
+                <span className="px-2 py-1 rounded-full bg-primary/10 text-primary">
+                  Run {latestTrainingRun.run_id.slice(0, 8)}
+                </span>
+              ) : (
+                <span className="px-2 py-1 rounded-full bg-secondary text-muted-foreground">No Run Data</span>
+              )}
+            </div>
+          </div>
+
+          {mlSyncError && (
+            <p className="text-xs text-warning mt-3">{mlSyncError}</p>
+          )}
+
+          {latestTrainingRun && (
+            <>
+              <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-2 mt-4">
+                <div className="rounded-lg bg-secondary/40 px-3 py-2">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">AML Alerts</p>
+                  <p className="text-sm font-mono font-semibold mt-1">{amlAlertCount}</p>
+                </div>
+                <div className="rounded-lg bg-secondary/40 px-3 py-2">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Entity Links</p>
+                  <p className="text-sm font-mono font-semibold mt-1">{linkedPairCount}</p>
+                </div>
+                <div className="rounded-lg bg-secondary/40 px-3 py-2">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Suspicious Nodes</p>
+                  <p className="text-sm font-mono font-semibold mt-1">{suspiciousNodeCount}</p>
+                </div>
+                <div className="rounded-lg bg-secondary/40 px-3 py-2">
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Advanced AUC</p>
+                  <p className="text-sm font-mono font-semibold mt-1">{advancedAuc.toFixed(3)}</p>
+                </div>
+              </div>
+
+              <div className="mt-3 grid lg:grid-cols-2 gap-2">
+                {latestTrainingRun.results.map((result) => (
+                  <div key={result.pipeline} className="rounded-lg border border-border bg-secondary/30 px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-semibold">{result.pipeline}</p>
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
+                          result.status === "success"
+                            ? "bg-success/10 text-success"
+                            : "bg-destructive/10 text-destructive"
+                        }`}
+                      >
+                        {result.status}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground mt-1">
+                      rows: {result.rows} | model: {result.model_type}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
       </SectionReveal>
 
       <SectionReveal>
@@ -628,7 +1032,7 @@ export default function FraudIntelligence() {
           >
             <div className="grid lg:grid-cols-3 gap-4">
               <div className="lg:col-span-2 space-y-3">
-                {fraudDNAs.map((dna, i) => (
+                {fraudDNAData.map((dna, i) => (
                   <motion.div
                     key={dna.id}
                     initial={{ opacity: 0, x: -16 }}
@@ -814,7 +1218,7 @@ export default function FraudIntelligence() {
             <div className="grid xl:grid-cols-12 gap-4">
               <div className="xl:col-span-3 space-y-4">
                 <CaseLinkingPanel
-                  options={investigationCaseOptions}
+                  options={caseOptions}
                   selectedCaseIds={selectedCaseIds}
                   onSelectedCaseIdsChange={updateCases}
                   commonAccountLabels={commonAccountLabels}

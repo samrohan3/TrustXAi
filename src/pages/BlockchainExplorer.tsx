@@ -1,13 +1,22 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Boxes, CheckCircle, Clock, Hash, Search, Copy, ExternalLink, Cpu, Database,
-  Shield, Activity, Radio, X, ChevronRight, Server,
+  Boxes, CheckCircle, Clock, Hash, Search, Copy, Cpu, Database,
+  Shield, Activity, Radio, X, ChevronRight, Server, RotateCcw, type LucideIcon,
 } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import SectionReveal from "@/components/shared/SectionReveal";
-import { blockchainEntries, type BlockchainEntry } from "@/data/mockData";
+import { blockchainEntries as fallbackBlockchainEntries, type BlockchainEntry } from "@/data/mockData";
+import { useAuth } from "@/contexts/AuthContext";
 import { useAnimatedCounter } from "@/hooks/useAnimatedCounter";
+import {
+  fetchBlockchainContracts,
+  fetchBlockchainEntries,
+  fetchBlockchainMetrics,
+  type BackendBlockchainEntry,
+  type BackendBlockchainMetrics,
+  type BackendSmartContract,
+} from "@/lib/backendApi";
 import VisualMetricStrip from "@/components/shared/VisualMetricStrip";
 
 const actionColor: Record<string, string> = {
@@ -17,29 +26,40 @@ const actionColor: Record<string, string> = {
   SMART_CONTRACT_EXEC: "bg-accent/10 text-accent",
 };
 
-const actionIcon: Record<string, any> = {
+const actionIcon: Record<string, LucideIcon> = {
   STORE_FRAUD_DNA: Database,
   FLAG_TRANSACTION: Shield,
   UPDATE_RISK_SCORE: Activity,
   SMART_CONTRACT_EXEC: Cpu,
 };
 
-const gasHistory = [
-  { block: "18.84M", gas: 42000 },
-  { block: "18.84M", gas: 48000 },
-  { block: "18.84M", gas: 52100 },
-  { block: "18.85M", gas: 38000 },
-  { block: "18.85M", gas: 68400 },
-  { block: "18.85M", gas: 47832 },
-  { block: "18.85M", gas: 31200 },
-];
+interface SmartContractView {
+  name: string;
+  address: string;
+  calls: number;
+  status: string;
+}
 
-const smartContracts = [
+const fallbackSmartContracts: SmartContractView[] = [
   { name: "FraudDNARegistry.sol", address: "0x742d...35Cc", calls: 2847, status: "active" },
   { name: "RiskOracle.sol", address: "0x1f9a...8bD2", calls: 12340, status: "active" },
   { name: "ComplianceGate.sol", address: "0x3e7c...4aF1", calls: 5621, status: "active" },
   { name: "AlertDispatcher.sol", address: "0x8b2d...9cE3", calls: 891, status: "paused" },
 ];
+
+const actionFunctionMap: Record<string, string> = {
+  STORE_FRAUD_DNA: "storeFraudDNA(bytes32,uint256)",
+  FLAG_TRANSACTION: "flagTransaction(bytes32)",
+  UPDATE_RISK_SCORE: "updateRiskScore(address,uint8)",
+  SMART_CONTRACT_EXEC: "executeAlert(uint256,bytes)",
+};
+
+const actionContractMap: Record<string, string> = {
+  STORE_FRAUD_DNA: "FraudDNARegistry",
+  FLAG_TRANSACTION: "ComplianceGate",
+  UPDATE_RISK_SCORE: "RiskOracle",
+  SMART_CONTRACT_EXEC: "AlertDispatcher",
+};
 
 // Generate live chain events
 let eventCounter = 100;
@@ -58,33 +78,121 @@ function randomEvent(): BlockchainEntry {
   };
 }
 
+const mapBlockchainEntry = (entry: BackendBlockchainEntry): BlockchainEntry => ({
+  txHash: entry.tx_hash,
+  blockNumber: entry.block_number,
+  timestamp: entry.timestamp,
+  action: entry.action,
+  fraudDnaHash: entry.fraud_dna_hash,
+  status: entry.status === "pending" ? "pending" : "confirmed",
+  gasUsed: entry.gas_used,
+});
+
+const mapSmartContract = (contract: BackendSmartContract): SmartContractView => ({
+  name: contract.name,
+  address: contract.address,
+  calls: contract.calls,
+  status: contract.status,
+});
+
 export default function BlockchainExplorer() {
+  const { authToken } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedEntry, setSelectedEntry] = useState<BlockchainEntry | null>(null);
-  const [liveEntries, setLiveEntries] = useState<BlockchainEntry[]>(blockchainEntries);
+  const [liveEntries, setLiveEntries] = useState<BlockchainEntry[]>(fallbackBlockchainEntries);
+  const [contractRows, setContractRows] = useState<SmartContractView[] | null>(null);
+  const [backendMetrics, setBackendMetrics] = useState<BackendBlockchainMetrics | null>(null);
+  const [chainSyncLoading, setChainSyncLoading] = useState(false);
+  const [chainSyncMessage, setChainSyncMessage] = useState<string | null>(null);
   const [isLive, setIsLive] = useState(true);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"activity" | "contracts" | "analytics">("activity");
 
-  const totalBlocks = useAnimatedCounter(18847291, 2000);
-  const fraudSigs = useAnimatedCounter(2847, 1500, 200);
-  const avgConfirm = useAnimatedCounter(124, 1200, 300);
-  const totalGas = useAnimatedCounter(248, 1000, 400);
+  const contractsData = contractRows ?? fallbackSmartContracts;
+
+  const syncBlockchainData = useCallback(
+    async (background = false) => {
+      if (!authToken) {
+        if (!background) {
+          setLiveEntries(fallbackBlockchainEntries);
+          setContractRows(null);
+          setBackendMetrics(null);
+          setChainSyncMessage("Backend auth token unavailable. Showing local blockchain simulation.");
+        }
+        return;
+      }
+
+      if (!background) {
+        setChainSyncLoading(true);
+        setChainSyncMessage("Syncing blockchain entries from MongoDB...");
+      }
+
+      try {
+        const [entryRows, contractDataRows, metrics] = await Promise.all([
+          fetchBlockchainEntries(),
+          fetchBlockchainContracts(),
+          fetchBlockchainMetrics(),
+        ]);
+
+        const mappedEntries = entryRows.map(mapBlockchainEntry);
+        const mappedContracts = contractDataRows.map(mapSmartContract);
+
+        setLiveEntries(mappedEntries.length ? mappedEntries : fallbackBlockchainEntries);
+        setContractRows(mappedContracts);
+        setBackendMetrics(metrics);
+
+        if (!background) {
+          setChainSyncMessage(
+            `Loaded ${mappedEntries.length} on-chain events and ${mappedContracts.length} smart contracts from MongoDB.`,
+          );
+        }
+      } catch (error) {
+        if (!background) {
+          const detail = error instanceof Error ? error.message : "Failed to load blockchain data.";
+          setLiveEntries(fallbackBlockchainEntries);
+          setContractRows(null);
+          setBackendMetrics(null);
+          setChainSyncMessage(`${detail} Falling back to local blockchain simulation.`);
+        }
+      } finally {
+        if (!background) {
+          setChainSyncLoading(false);
+        }
+      }
+    },
+    [authToken],
+  );
+
+  useEffect(() => {
+    void syncBlockchainData();
+  }, [syncBlockchainData]);
 
   // Live chain activity
   useEffect(() => {
     if (!isLive) return;
-    const id = setInterval(() => {
-      setLiveEntries(prev => [randomEvent(), ...prev].slice(0, 20));
-    }, 5000);
-    return () => clearInterval(id);
-  }, [isLive]);
+    if (!authToken) {
+      const id = setInterval(() => {
+        setLiveEntries((previous) => [randomEvent(), ...previous].slice(0, 20));
+      }, 5000);
+      return () => clearInterval(id);
+    }
 
-  const filteredEntries = liveEntries.filter(e =>
-    searchQuery === "" ||
-    e.txHash.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    e.action.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    e.fraudDnaHash.toLowerCase().includes(searchQuery.toLowerCase())
+    const id = setInterval(() => {
+      void syncBlockchainData(true);
+    }, 10000);
+    return () => clearInterval(id);
+  }, [authToken, isLive, syncBlockchainData]);
+
+  const filteredEntries = useMemo(
+    () =>
+      liveEntries.filter(
+        (entry) =>
+          searchQuery === "" ||
+          entry.txHash.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          entry.action.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          entry.fraudDnaHash.toLowerCase().includes(searchQuery.toLowerCase()),
+      ),
+    [liveEntries, searchQuery],
   );
 
   const confirmedCount = filteredEntries.filter((entry) => entry.status === "confirmed").length;
@@ -95,7 +203,7 @@ export default function BlockchainExplorer() {
   const avgGasLive = Math.round(
     filteredEntries.reduce((sum, entry) => sum + entry.gasUsed, 0) / Math.max(filteredEntries.length, 1),
   );
-  const activeContractCount = smartContracts.filter((contract) => contract.status === "active").length;
+  const activeContractCount = contractsData.filter((contract) => contract.status === "active").length;
 
   const gasPulseData = filteredEntries
     .slice(0, 12)
@@ -104,6 +212,41 @@ export default function BlockchainExplorer() {
       label: `B${index + 1}`,
       value: Math.round(entry.gasUsed / 1000),
     }));
+
+  const gasHistoryData = useMemo(
+    () =>
+      filteredEntries
+        .slice(0, 12)
+        .reverse()
+        .map((entry) => ({
+          block: `#${entry.blockNumber}`,
+          gas: entry.gasUsed,
+        })),
+    [filteredEntries],
+  );
+
+  const totalBlocksValue = liveEntries.length
+    ? Math.max(...liveEntries.map((entry) => entry.blockNumber))
+    : 18847291;
+  const fraudSignatureValue = liveEntries.filter((entry) => entry.action === "STORE_FRAUD_DNA").length;
+  const confirmationStat = backendMetrics?.confirmation_rate ?? confirmationRate;
+  const averageGasStat = backendMetrics?.average_gas ?? avgGasLive;
+
+  const totalBlocks = useAnimatedCounter(totalBlocksValue, 2000);
+  const fraudSigs = useAnimatedCounter(fraudSignatureValue, 1500, 200);
+  const avgConfirm = useAnimatedCounter(confirmationStat, 1200, 300);
+  const totalGas = useAnimatedCounter(averageGasStat, 1000, 400);
+
+  const recentContractInteractions = useMemo(
+    () =>
+      filteredEntries.slice(0, 5).map((entry, index) => ({
+        fn: actionFunctionMap[entry.action] ?? `${entry.action.toLowerCase()}(bytes32)`,
+        contract: actionContractMap[entry.action] ?? "PolicyContract",
+        gas: entry.gasUsed.toLocaleString(),
+        time: index === 0 ? "latest" : `${index * 12}s ago`,
+      })),
+    [filteredEntries],
+  );
 
   const copyHash = (hash: string) => {
     navigator.clipboard.writeText(hash);
@@ -117,10 +260,23 @@ export default function BlockchainExplorer() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Blockchain Explorer</h1>
           <p className="text-sm text-muted-foreground mt-1">On-chain fraud signatures, smart contracts, and chain analytics</p>
+          {chainSyncMessage ? (
+            <p className="text-[11px] text-muted-foreground mt-1.5">
+              Data Source: {contractRows ? "MongoDB" : "Local Fallback"} • {chainSyncMessage}
+            </p>
+          ) : null}
         </div>
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full ${isLive ? "bg-success animate-pulse" : "bg-muted-foreground"}`} />
           <span className="text-xs font-mono text-muted-foreground">{isLive ? "SYNCING" : "PAUSED"}</span>
+          <button
+            onClick={() => void syncBlockchainData()}
+            disabled={chainSyncLoading}
+            className="ml-1 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-secondary text-xs font-medium hover:bg-secondary/80 transition-colors disabled:cursor-not-allowed"
+          >
+            <RotateCcw className={`w-3.5 h-3.5 ${chainSyncLoading ? "animate-spin" : ""}`} />
+            {chainSyncLoading ? "Syncing" : "Sync MongoDB"}
+          </button>
           <button onClick={() => setIsLive(p => !p)} className="ml-1 px-3 py-1.5 rounded-lg bg-secondary text-xs font-medium hover:bg-secondary/80 transition-colors">
             {isLive ? "Pause" : "Resume"}
           </button>
@@ -132,6 +288,7 @@ export default function BlockchainExplorer() {
           title="Chain Integrity Pulse"
           subtitle="On-chain validation metrics for fraud signature anchoring and contract execution health"
           variant="chain"
+          chartType="scatter"
           chartPlacement="right"
           metrics={[
             {
@@ -157,7 +314,7 @@ export default function BlockchainExplorer() {
             },
             {
               label: "Active Contracts",
-              value: `${activeContractCount}/${smartContracts.length}`,
+              value: `${activeContractCount}/${contractsData.length}`,
               hint: "deployed policy contracts",
               icon: Server,
               tone: "primary",
@@ -180,8 +337,8 @@ export default function BlockchainExplorer() {
           {[
             { label: "Total Blocks", value: totalBlocks.toLocaleString(), icon: Boxes, color: "text-primary" },
             { label: "Fraud Signatures", value: fraudSigs.toLocaleString(), icon: Hash, color: "text-destructive" },
-            { label: "Avg Confirm", value: `${(avgConfirm / 10).toFixed(1)}s`, icon: Clock, color: "text-warning" },
-            { label: "Total Gas (M)", value: `${(totalGas / 10).toFixed(1)}M`, icon: Cpu, color: "text-accent" },
+            { label: "Confirm Rate", value: `${avgConfirm}%`, icon: Clock, color: "text-warning" },
+            { label: "Avg Gas", value: totalGas.toLocaleString(), icon: Cpu, color: "text-accent" },
           ].map((stat, i) => (
             <motion.div key={stat.label} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
               transition={{ delay: i * 0.08 }} className="glass rounded-xl p-5 flex items-center gap-4">
@@ -240,7 +397,7 @@ export default function BlockchainExplorer() {
                   {filteredEntries.map((entry) => {
                     const ActionIcon = actionIcon[entry.action] || Boxes;
                     return (
-                      <motion.div key={entry.txHash}
+                      <motion.div key={`${entry.txHash}-${entry.blockNumber}`}
                         initial={{ opacity: 0, y: -10, height: 0 }}
                         animate={{ opacity: 1, y: 0, height: "auto" }}
                         exit={{ opacity: 0, height: 0 }}
@@ -293,7 +450,7 @@ export default function BlockchainExplorer() {
             <div className="glass rounded-xl p-5">
               <h3 className="text-sm font-semibold mb-4">Deployed Smart Contracts</h3>
               <div className="space-y-3">
-                {smartContracts.map((sc, i) => (
+                {contractsData.map((sc, i) => (
                   <motion.div key={sc.name} initial={{ opacity: 0, x: -12 }} animate={{ opacity: 1, x: 0 }}
                     transition={{ delay: i * 0.08 }}
                     className="flex items-center gap-4 p-4 rounded-lg bg-secondary/50 hover:bg-secondary transition-colors">
@@ -322,13 +479,7 @@ export default function BlockchainExplorer() {
             <div className="glass rounded-xl p-5">
               <h3 className="text-sm font-semibold mb-4">Recent Contract Interactions</h3>
               <div className="space-y-2 font-mono text-xs">
-                {[
-                  { fn: "storeFraudDNA(bytes32,uint256)", contract: "FraudDNARegistry", gas: "47,832", time: "2s ago" },
-                  { fn: "updateRiskScore(address,uint8)", contract: "RiskOracle", gas: "31,200", time: "18s ago" },
-                  { fn: "flagTransaction(bytes32)", contract: "ComplianceGate", gas: "52,100", time: "45s ago" },
-                  { fn: "executeAlert(uint256,bytes)", contract: "AlertDispatcher", gas: "68,400", time: "1m ago" },
-                  { fn: "verifySignature(bytes32,bytes)", contract: "FraudDNARegistry", gas: "28,900", time: "2m ago" },
-                ].map((log, i) => (
+                {recentContractInteractions.map((log, i) => (
                   <motion.div key={i} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.06 }}
                     className="p-3 rounded-lg bg-secondary/50 flex items-center gap-3">
                     <span className="text-primary shrink-0">→</span>
@@ -350,7 +501,7 @@ export default function BlockchainExplorer() {
             <div className="glass rounded-xl p-5">
               <h3 className="text-sm font-semibold mb-4">Gas Usage Over Time</h3>
               <ResponsiveContainer width="100%" height={260}>
-                <AreaChart data={gasHistory}>
+                <AreaChart data={gasHistoryData}>
                   <defs>
                     <linearGradient id="gradGas" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="hsl(210, 100%, 60%)" stopOpacity={0.3} />
