@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     DATA_DIR: str = "data"
     MODEL_ARTIFACTS_DIR: str = "backend/model_artifacts"
     MAX_TRAINING_ROWS: int = 0
+    OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
+    OLLAMA_MODEL: str = "gemma2:2b"
+    OLLAMA_TIMEOUT_SECONDS: int = 60
+    OLLAMA_MAX_CONTEXT_CHARS: int = 12000
 
     model_config = SettingsConfigDict(
         env_file=".env",

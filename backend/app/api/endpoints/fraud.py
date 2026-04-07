@@ -13,6 +13,8 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
@@ -31,6 +33,8 @@ from app.schemas.api import (
     InvestigationCaseOption,
     InvestigationCaseRead,
     InvestigationAuditLogRead,
+    InvestigationLocalAiSummaryRequest,
+    InvestigationLocalAiSummaryResponse,
     InvestigationAuditVerifyResponse,
     InvestigationEdgeRead,
     InvestigationMergedResponse,
@@ -470,6 +474,141 @@ def _build_export_payload(db: Database, case_ids: list[str]) -> dict[str, Any]:
         "alerts": enriched_alerts,
         "workflow_cases": serialized_workflows,
     }
+
+
+def _build_local_ai_report_prompt(
+    report: dict[str, Any],
+    analytics: dict[str, Any] | None,
+    user_prompt: str | None,
+) -> str:
+    compact_context = {
+        "generated_at": report.get("generated_at"),
+        "case_ids": report.get("case_ids", []),
+        "totals": report.get("totals", {}),
+        "case_summaries": report.get("cases", [])[:6],
+        "top_path_risks": [
+            {
+                "case_id": entry.get("case_id"),
+                "label": entry.get("label"),
+                "risk_score": entry.get("risk_score"),
+                "chain": entry.get("chain", [])[:8],
+                "explanation": entry.get("explanation"),
+            }
+            for entry in report.get("path_risks", [])[:10]
+        ],
+        "top_alerts": [
+            {
+                "id": alert.get("id"),
+                "severity": alert.get("severity"),
+                "transaction_id": alert.get("transaction_id"),
+                "risk_score": alert.get("risk_score"),
+                "model_confidence": alert.get("model_confidence"),
+                "rule_confidence": alert.get("rule_confidence"),
+                "top_factors": alert.get("top_factors", [])[:3],
+            }
+            for alert in report.get("alerts", [])[:8]
+        ],
+        "workflow_snapshot": [
+            {
+                "workflow_case_id": row.get("workflow_case_id"),
+                "title": row.get("title"),
+                "status": row.get("status"),
+                "priority": row.get("priority"),
+                "sla_breached": row.get("sla_breached"),
+                "assigned_to_name": row.get("assigned_to_name"),
+            }
+            for row in report.get("workflow_cases", [])[:8]
+        ],
+        "analytics": analytics or {},
+    }
+
+    context_json = json.dumps(compact_context, ensure_ascii=True, default=str)
+    if len(context_json) > settings.OLLAMA_MAX_CONTEXT_CHARS:
+        context_json = context_json[: settings.OLLAMA_MAX_CONTEXT_CHARS] + " ...[truncated]"
+
+    extra_instruction = (user_prompt or "").strip()
+    if extra_instruction:
+        extra_instruction = f"Additional analyst instruction: {extra_instruction}\n"
+
+    return (
+        "You are a senior AML and fraud investigation analyst assistant. "
+        "Use the JSON context and produce a concise response with these headings:\n"
+        "1) Executive Summary\n"
+        "2) Top Risk Findings\n"
+        "3) Recommended Actions (next 24h)\n"
+        "4) Watchlist Signals\n"
+        "Keep each bullet specific and evidence-driven. Avoid generic wording.\n"
+        f"{extra_instruction}"
+        "Context JSON:\n"
+        f"{context_json}"
+    )
+
+
+def _generate_local_ai_report_summary(prompt: str) -> tuple[str, dict[str, Any]]:
+    endpoint = f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/generate"
+    payload = {
+        "model": settings.OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.2,
+            "top_p": 0.9,
+        },
+    }
+
+    request = urllib_request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(request, timeout=settings.OLLAMA_TIMEOUT_SECONDS) as response:
+            raw_body = response.read().decode("utf-8")
+    except urllib_error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else str(exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Local Ollama returned HTTP {exc.code}: {detail[:400]}",
+        ) from exc
+    except urllib_error.URLError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Unable to reach local Ollama service. "
+                "Ensure it is running and the model is pulled (ollama run gemma2:2b)."
+            ),
+        ) from exc
+
+    try:
+        response_payload = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Local Ollama returned an invalid JSON response.",
+        ) from exc
+
+    summary = str(response_payload.get("response") or "").strip()
+    if not summary:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Local Ollama responded without summary text.",
+        )
+
+    usage = {
+        "total_duration": response_payload.get("total_duration"),
+        "load_duration": response_payload.get("load_duration"),
+        "prompt_eval_count": response_payload.get("prompt_eval_count"),
+        "eval_count": response_payload.get("eval_count"),
+        "eval_duration": response_payload.get("eval_duration"),
+    }
+    usage = {key: value for key, value in usage.items() if value is not None}
+
+    return summary, usage
 
 
 def _build_report_pdf_bytes(report: dict[str, Any]) -> bytes:
@@ -1707,3 +1846,47 @@ def export_investigation_regulator_bundle(
         "Content-Disposition": f'attachment; filename="{filename}"',
     }
     return Response(content=bundle_bytes, media_type="application/zip", headers=headers)
+
+
+@router.post(
+    "/investigation/reports/ai-summary",
+    response_model=InvestigationLocalAiSummaryResponse,
+)
+def generate_investigation_report_ai_summary(
+    payload: InvestigationLocalAiSummaryRequest,
+    db: Database = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> InvestigationLocalAiSummaryResponse:
+    normalized_case_ids = _normalize_case_ids_or_422(payload.case_ids)
+    report = _build_export_payload(db, normalized_case_ids)
+    prompt = _build_local_ai_report_prompt(
+        report,
+        analytics=payload.analytics,
+        user_prompt=payload.prompt,
+    )
+    summary, usage = _generate_local_ai_report_summary(prompt)
+
+    audit_entity_id = f"AIS-{uuid4().hex[:10].upper()}"
+    _record_audit_log(
+        db,
+        actor_user=current_user,
+        action="local_ai_summary_generated",
+        entity_type="investigation_ai_summary",
+        entity_id=audit_entity_id,
+        case_id=normalized_case_ids[0] if len(normalized_case_ids) == 1 else None,
+        payload={
+            "case_ids": normalized_case_ids,
+            "provider": "ollama",
+            "model": settings.OLLAMA_MODEL,
+            "usage": usage,
+        },
+    )
+
+    return InvestigationLocalAiSummaryResponse(
+        provider="ollama",
+        model=settings.OLLAMA_MODEL,
+        generated_at=datetime.now(timezone.utc),
+        case_ids=normalized_case_ids,
+        summary=summary,
+        usage=usage,
+    )

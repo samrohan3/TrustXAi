@@ -18,9 +18,14 @@ import {
 import {
   AreaChart,
   Area,
+  Bar,
+  BarChart,
   XAxis,
   YAxis,
   CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
   Tooltip,
   ResponsiveContainer,
   RadarChart,
@@ -237,6 +242,10 @@ export default function FraudIntelligence() {
   const [collapsedLayers, setCollapsedLayers] = useState<number[]>([]);
   const [timelineStep, setTimelineStep] = useState(1);
   const [bankAccountOnly, setBankAccountOnly] = useState(false);
+  const [nodeSearchQuery, setNodeSearchQuery] = useState("");
+  const [minHopAmountLakh, setMinHopAmountLakh] = useState(0);
+  const [focusRiskRoute, setFocusRiskRoute] = useState(false);
+  const [showAdvancedNetworkPanels, setShowAdvancedNetworkPanels] = useState(false);
   const [fraudDnaRows, setFraudDnaRows] = useState<FraudDNA[] | null>(null);
   const [investigationOptionsRows, setInvestigationOptionsRows] = useState<CaseOption[] | null>(null);
   const [mergedInvestigationRows, setMergedInvestigationRows] = useState<MergedInvestigationData | null>(null);
@@ -616,26 +625,15 @@ export default function FraudIntelligence() {
     return hints.sort((a, b) => b.probability - a.probability).slice(0, 8);
   }, [linkedNodeIds, mergedInvestigation.nodes]);
 
-  const graphNodes = useMemo(
-    () =>
-      bankAccountOnly
-        ? mergedInvestigation.nodes.filter((node) => node.nodeType === "bank-account")
-        : mergedInvestigation.nodes,
-    [bankAccountOnly, mergedInvestigation.nodes],
+  const sortedPathRisks = useMemo(
+    () => [...mergedInvestigation.pathRisks].sort((a, b) => b.riskScore - a.riskScore),
+    [mergedInvestigation.pathRisks],
   );
 
-  const graphNodeIdSet = useMemo(
-    () => new Set(graphNodes.map((node) => node.id)),
-    [graphNodes],
-  );
-
-  const graphEdges = useMemo(
-    () =>
-      mergedInvestigation.edges.filter(
-        (edge) => graphNodeIdSet.has(edge.from) && graphNodeIdSet.has(edge.to),
-      ),
-    [graphNodeIdSet, mergedInvestigation.edges],
-  );
+  const highlightedNodeIds = useMemo(() => {
+    if (hasFilterInput) return linkedNodeIds;
+    return sortedPathRisks[0]?.chain ?? [];
+  }, [hasFilterInput, linkedNodeIds, sortedPathRisks]);
 
   const commonAccountLabels = useMemo(
     () =>
@@ -651,6 +649,72 @@ export default function FraudIntelligence() {
         ? mergedInvestigation.commonNodeIds.filter((id) => nodeLookup[id]?.nodeType === "bank-account")
         : mergedInvestigation.commonNodeIds,
     [bankAccountOnly, mergedInvestigation.commonNodeIds, nodeLookup],
+  );
+
+  const baseGraphNodes = useMemo(
+    () =>
+      bankAccountOnly
+        ? mergedInvestigation.nodes.filter((node) => node.nodeType === "bank-account")
+        : mergedInvestigation.nodes,
+    [bankAccountOnly, mergedInvestigation.nodes],
+  );
+
+  const maxHopAmountLakh = useMemo(() => {
+    const maxAmount = mergedInvestigation.edges.reduce((max, edge) => Math.max(max, edge.amount), 0);
+    return Math.max(5, Math.ceil(maxAmount / 100000));
+  }, [mergedInvestigation.edges]);
+
+  useEffect(() => {
+    if (minHopAmountLakh > maxHopAmountLakh) {
+      setMinHopAmountLakh(maxHopAmountLakh);
+    }
+  }, [maxHopAmountLakh, minHopAmountLakh]);
+
+  const riskRouteNodeSet = useMemo(
+    () =>
+      new Set([
+        ...highlightedNodeIds,
+        ...mergedInvestigation.sourceNodeIds,
+        ...mergedInvestigation.destinationNodeIds,
+        ...commonGraphNodeIds,
+      ]),
+    [
+      commonGraphNodeIds,
+      highlightedNodeIds,
+      mergedInvestigation.destinationNodeIds,
+      mergedInvestigation.sourceNodeIds,
+    ],
+  );
+
+  const graphNodes = useMemo(() => {
+    const query = nodeSearchQuery.trim().toLowerCase();
+
+    return baseGraphNodes.filter((node) => {
+      const matchesSearch = !query
+        || node.label.toLowerCase().includes(query)
+        || node.holderName.toLowerCase().includes(query)
+        || node.bankName.toLowerCase().includes(query)
+        || node.phone.toLowerCase().includes(query);
+
+      const matchesRiskFocus = !focusRiskRoute || riskRouteNodeSet.has(node.id);
+      return matchesSearch && matchesRiskFocus;
+    });
+  }, [baseGraphNodes, focusRiskRoute, nodeSearchQuery, riskRouteNodeSet]);
+
+  const graphNodeIdSet = useMemo(
+    () => new Set(graphNodes.map((node) => node.id)),
+    [graphNodes],
+  );
+
+  const graphEdges = useMemo(() => {
+    const minAmount = minHopAmountLakh * 100000;
+    return mergedInvestigation.edges.filter(
+      (edge) => graphNodeIdSet.has(edge.from) && graphNodeIdSet.has(edge.to) && edge.amount >= minAmount,
+    );
+  }, [graphNodeIdSet, mergedInvestigation.edges, minHopAmountLakh]);
+
+  const graphCoveragePct = Math.round(
+    (graphNodes.length / Math.max(baseGraphNodes.length, 1)) * 100,
   );
 
   const sourceAccountDetails = useMemo(
@@ -703,15 +767,84 @@ export default function FraudIntelligence() {
     [layerByNode, mergedInvestigation.commonNodeIds, mergedInvestigation.selectedCases, nodeLookup],
   );
 
-  const sortedPathRisks = useMemo(
-    () => [...mergedInvestigation.pathRisks].sort((a, b) => b.riskScore - a.riskScore),
-    [mergedInvestigation.pathRisks],
+  const txByRef = useMemo(() => new Map(transactionData.map((tx) => [tx.id, tx])), [transactionData]);
+
+  const visibleTrailValue = useMemo(
+    () => graphEdges.reduce((sum, edge) => sum + edge.amount, 0),
+    [graphEdges],
   );
 
-  const highlightedNodeIds = useMemo(() => {
-    if (hasFilterInput) return linkedNodeIds;
-    return sortedPathRisks[0]?.chain ?? [];
-  }, [hasFilterInput, linkedNodeIds, sortedPathRisks]);
+  const avgHopRisk = useMemo(() => {
+    const riskScores = graphEdges
+      .map((edge) => txByRef.get(edge.txRef)?.riskScore)
+      .filter((value): value is number => typeof value === "number");
+
+    if (!riskScores.length) return 0;
+    return Math.round(riskScores.reduce((sum, value) => sum + value, 0) / riskScores.length);
+  }, [graphEdges, txByRef]);
+
+  const blockedHopCount = useMemo(
+    () => graphEdges.filter((edge) => txByRef.get(edge.txRef)?.status === "blocked").length,
+    [graphEdges, txByRef],
+  );
+
+  const destinationCoveragePct = Math.round(
+    (destinationAccountDetails.filter((node) => graphNodeIdSet.has(node.id)).length
+      / Math.max(destinationAccountDetails.length, 1))
+      * 100,
+  );
+
+  const layerFlowMetrics = useMemo(
+    () =>
+      Array.from({ length: totalLayers }, (_, index) => {
+        const layer = index + 1;
+        const layerNodes = graphNodes.filter((node) => (layerByNode[node.id] ?? node.defaultLayer) === layer);
+        const layerEdges = graphEdges.filter(
+          (edge) => (layerByNode[edge.from] ?? 0) === layer || (layerByNode[edge.to] ?? 0) === layer,
+        );
+
+        const amountLakh = Math.max(
+          0,
+          Math.round(layerEdges.reduce((sum, edge) => sum + edge.amount, 0) / 100000),
+        );
+        const avgRisk = Math.round(
+          layerEdges.reduce((sum, edge) => sum + (txByRef.get(edge.txRef)?.riskScore ?? 0), 0)
+            / Math.max(layerEdges.length, 1),
+        );
+
+        return {
+          layer: `L${layer}`,
+          nodeCount: layerNodes.length,
+          hopCount: layerEdges.length,
+          amountLakh,
+          avgRisk,
+        };
+      }),
+    [graphEdges, graphNodes, layerByNode, totalLayers, txByRef],
+  );
+
+  const caseRiskSnapshot = useMemo(
+    () =>
+      mergedInvestigation.selectedCases
+        .map((entry) => {
+          const totalAmountLakh = Math.round(
+            entry.edges.reduce((sum, edge) => sum + edge.amount, 0) / 100000,
+          );
+          const riskMax = Math.max(...entry.pathRisks.map((path) => path.riskScore), 0);
+          const riskAvg = Math.round(
+            entry.pathRisks.reduce((sum, path) => sum + path.riskScore, 0) / Math.max(entry.pathRisks.length, 1),
+          );
+
+          return {
+            caseId: entry.caseId,
+            riskMax,
+            riskAvg,
+            totalAmountLakh,
+          };
+        })
+        .sort((left, right) => right.riskMax - left.riskMax),
+    [mergedInvestigation.selectedCases],
+  );
 
   const linkedTransactions = useMemo(() => {
     const refs = new Set(mergedInvestigation.edges.map((edge) => edge.txRef));
@@ -822,6 +955,15 @@ export default function FraudIntelligence() {
     setCollapsedLayers((previous) =>
       previous.includes(layer) ? previous.filter((entry) => entry !== layer) : [...previous, layer],
     );
+  };
+
+  const resetNetworkView = () => {
+    setNodeSearchQuery("");
+    setMinHopAmountLakh(0);
+    setFocusRiskRoute(false);
+    setCollapsedLayers([]);
+    setBankAccountOnly(false);
+    setShowAdvancedNetworkPanels(false);
   };
 
   const graphStep = investigationMode ? timelineStep : Math.min(timelineStep, 2);
@@ -1010,12 +1152,14 @@ export default function FraudIntelligence() {
       </SectionReveal>
 
       <SectionReveal>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
           {[
             { icon: Fingerprint, label: "Fraud DNAs", value: totalPatterns.toString(), color: "text-primary" },
             { icon: Target, label: "Avg Similarity", value: `${avgSimilarity}%`, color: "text-warning" },
             { icon: AlertTriangle, label: "Active Threats", value: activeThreats.toString(), color: "text-destructive" },
             { icon: Shield, label: "Block Rate", value: "99.2%", color: "text-success" },
+            { icon: Link2, label: "Visible Trail Value", value: `${Math.max(0, Math.round(visibleTrailValue / 100000))}L`, color: "text-accent" },
+            { icon: Network, label: "Graph Coverage", value: `${graphCoveragePct}%`, color: "text-primary" },
           ].map((s, i) => (
             <motion.div
               key={s.label}
@@ -1195,42 +1339,113 @@ export default function FraudIntelligence() {
             exit={{ opacity: 0, y: -8 }}
             className="space-y-4"
           >
-            <div className="glass rounded-xl p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-              <div>
-                <h3 className="text-sm font-semibold flex items-center gap-2">
-                  <Network className="w-4 h-4 text-primary" /> Bank Account Layering Spider Map
-                </h3>
-                <p className="text-[11px] text-muted-foreground mt-1">
-                  Interactive nodal map for how money moved from one bank account to another with inter-case layer linking.
-                </p>
+            <div className="glass rounded-xl p-4 space-y-3">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold flex items-center gap-2">
+                    <Network className="w-4 h-4 text-primary" /> Bank Account Layering Spider Map
+                  </h3>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Interactive nodal map for how money moved from one bank account to another with inter-case layer linking.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-[10px]">
+                  <span className="px-2 py-1 rounded-full bg-primary/15 text-primary font-semibold">
+                    Total Layers: {totalLayers}
+                  </span>
+                  <span className="px-2 py-1 rounded-full bg-secondary text-muted-foreground font-semibold">
+                    Cases Selected: {selectedCaseIds.length}
+                  </span>
+                  <span className="px-2 py-1 rounded-full bg-secondary text-muted-foreground font-semibold">
+                    Visible Nodes: {graphNodes.length}
+                  </span>
+                  <span className="px-2 py-1 rounded-full bg-secondary text-muted-foreground font-semibold">
+                    Visible Hops: {graphEdges.length}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setBankAccountOnly((prev) => !prev)}
+                    className={`px-2 py-1 rounded-full font-semibold transition-colors ${
+                      bankAccountOnly
+                        ? "bg-accent/20 text-accent"
+                        : "bg-secondary text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {bankAccountOnly ? "Bank Accounts Only" : "All Nodes"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAdvancedNetworkPanels((prev) => !prev)}
+                    className={`px-2 py-1 rounded-full font-semibold transition-colors ${
+                      showAdvancedNetworkPanels
+                        ? "bg-warning/20 text-warning"
+                        : "bg-secondary text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {showAdvancedNetworkPanels ? "Advanced Panels ON" : "Advanced Panels OFF"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetNetworkView}
+                    className="px-2 py-1 rounded-full font-semibold bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    Reset View
+                  </button>
+                  <span
+                    className={`px-2 py-1 rounded-full font-semibold ${
+                      investigationMode
+                        ? "bg-success/15 text-success"
+                        : "bg-warning/15 text-warning"
+                    }`}
+                  >
+                    {investigationMode ? "Deep tracing enabled" : "Limited trace (Bank Mode)"}
+                  </span>
+                </div>
               </div>
-              <div className="flex flex-wrap items-center gap-2 text-[10px]">
-                <span className="px-2 py-1 rounded-full bg-primary/15 text-primary font-semibold">
-                  Total Layers: {totalLayers}
-                </span>
-                <span className="px-2 py-1 rounded-full bg-secondary text-muted-foreground font-semibold">
-                  Cases Selected: {selectedCaseIds.length}
-                </span>
+
+              <div className="grid md:grid-cols-3 gap-2">
+                <label className="rounded-lg border border-border bg-secondary/40 px-2.5 py-2">
+                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Account Search</span>
+                  <input
+                    value={nodeSearchQuery}
+                    onChange={(event) => setNodeSearchQuery(event.target.value)}
+                    placeholder="holder, bank, label, phone"
+                    className="mt-1 w-full bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+                  />
+                </label>
+
+                <div className="rounded-lg border border-border bg-secondary/40 px-2.5 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Min Hop Amount</span>
+                    <span className="text-[10px] font-mono text-foreground">{minHopAmountLakh}L</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={maxHopAmountLakh}
+                    value={minHopAmountLakh}
+                    onChange={(event) => setMinHopAmountLakh(Number(event.target.value))}
+                    className="mt-1 w-full accent-primary"
+                  />
+                </div>
+
                 <button
                   type="button"
-                  onClick={() => setBankAccountOnly((prev) => !prev)}
-                  className={`px-2 py-1 rounded-full font-semibold transition-colors ${
-                    bankAccountOnly
-                      ? "bg-accent/20 text-accent"
-                      : "bg-secondary text-muted-foreground hover:text-foreground"
+                  onClick={() => setFocusRiskRoute((prev) => !prev)}
+                  className={`rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                    focusRiskRoute
+                      ? "border-primary/60 bg-primary/10"
+                      : "border-border bg-secondary/40 hover:border-primary/40"
                   }`}
                 >
-                  {bankAccountOnly ? "Bank Accounts Only" : "All Nodes"}
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Route Focus</p>
+                  <p className="text-xs mt-1 font-medium">
+                    {focusRiskRoute ? "Top risk route only" : "All visible routes"}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground mt-1">
+                    Focuses the spider map on suspicious chain nodes.
+                  </p>
                 </button>
-                <span
-                  className={`px-2 py-1 rounded-full font-semibold ${
-                    investigationMode
-                      ? "bg-success/15 text-success"
-                      : "bg-warning/15 text-warning"
-                  }`}
-                >
-                  {investigationMode ? "Deep tracing enabled" : "Limited trace (Bank Mode)"}
-                </span>
               </div>
             </div>
 
@@ -1284,121 +1499,180 @@ export default function FraudIntelligence() {
                   activeStep={graphStep}
                 />
 
-                <div className="glass rounded-xl p-4">
-                  <div className="flex items-center justify-between gap-2 mb-3">
-                    <h4 className="text-sm font-semibold flex items-center gap-2">
-                      <ListTree className="w-4 h-4 text-primary" /> Layer Detection System
+                <div className="grid lg:grid-cols-2 gap-4">
+                  <div className="glass rounded-xl p-4">
+                    <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+                      <ListTree className="w-4 h-4 text-primary" /> Layer Flow Metrics
                     </h4>
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-semibold">
-                      Total Layers: {totalLayers}
-                    </span>
+                    <p className="text-[10px] text-muted-foreground mb-3">
+                      Per-layer hop intensity, moved value, and average risk profile.
+                    </p>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={layerFlowMetrics} margin={{ top: 6, right: 6, left: -14, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 16%, 14%)" opacity={0.45} />
+                        <XAxis dataKey="layer" tick={{ fontSize: 10, fill: "hsl(220, 10%, 50%)" }} />
+                        <YAxis yAxisId="left" tick={{ fontSize: 10, fill: "hsl(220, 10%, 50%)" }} />
+                        <YAxis yAxisId="right" orientation="right" domain={[0, 100]} tick={{ fontSize: 10, fill: "hsl(220, 10%, 50%)" }} />
+                        <Tooltip />
+                        <Legend wrapperStyle={{ fontSize: 10 }} />
+                        <Bar yAxisId="left" dataKey="amountLakh" name="Amount (L)" fill="hsl(48, 96%, 53%)" radius={[4, 4, 0, 0]} />
+                        <Line yAxisId="right" type="monotone" dataKey="avgRisk" name="Avg Risk" stroke="hsl(0, 84%, 60%)" strokeWidth={2} dot={{ r: 2 }} />
+                      </BarChart>
+                    </ResponsiveContainer>
                   </div>
 
-                  <div className="grid sm:grid-cols-2 gap-2">
-                    {layerSummary.map((entry) => {
-                      const collapsed = collapsedLayers.includes(entry.layer);
-                      return (
-                        <button
-                          key={entry.layer}
-                          type="button"
-                          onClick={() => toggleLayer(entry.layer)}
-                          disabled={!investigationMode}
-                          className={`text-left rounded-lg border p-3 transition-colors disabled:cursor-not-allowed ${
-                            collapsed
-                              ? "border-warning/50 bg-warning/10"
-                              : "border-border bg-secondary/40 hover:border-primary/40"
-                          }`}
-                        >
-                          <p className="text-xs font-semibold">
-                            Layer {entry.layer}: {layerLabel(entry.layer)}
-                          </p>
-                          <p className="text-[10px] text-muted-foreground mt-1">
-                            {entry.members.length} nodes | {collapsed ? "Collapsed" : "Expanded"}
-                          </p>
-                          <p className="text-[10px] text-muted-foreground mt-1 truncate">
-                            {entry.members.map((member) => member.label).join(" | ") || "No nodes"}
-                          </p>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="glass rounded-xl p-4">
-                  <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
-                    <Network className="w-4 h-4 text-primary" /> Inter-Case Spider Map Lanes
-                  </h4>
-                  <p className="text-[10px] text-muted-foreground mb-3">
-                    Selected cases are lined by bank-account layers L1 to L4 for cross-case comparison.
-                  </p>
-                  <div className="space-y-2 max-h-[280px] overflow-y-auto pr-1">
-                    {caseLayerLanes.map((lane) => (
-                      <div key={lane.caseId} className="rounded-lg border border-border bg-secondary/40 p-2.5">
-                        <div className="flex items-start justify-between gap-2">
-                          <div>
-                            <p className="text-xs font-semibold">{lane.caseId}</p>
-                            <p className="text-[10px] text-muted-foreground">{lane.title}</p>
-                          </div>
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-accent/20 text-accent font-semibold">
-                            {lane.linkedCount} linked
-                          </span>
-                        </div>
-                        <p className="text-[10px] text-muted-foreground mt-1">
-                          Source: <span className="text-foreground">{lane.sourceLabel}</span>
-                        </p>
-                        <p className="text-[10px] text-muted-foreground">
-                          Destination: <span className="text-foreground">{lane.destinationLabels.join(" | ") || "none"}</span>
-                        </p>
-
-                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-1.5 mt-2">
-                          {lane.bankLayerGroups.map((group, index) => (
-                            <div key={`${lane.caseId}-L${index + 1}`} className="rounded-md border border-border bg-background/60 p-1.5">
-                              <p className="text-[10px] font-semibold text-primary">L{index + 1}</p>
-                              <p className="text-[10px] text-muted-foreground">
-                                {group.length ? group.slice(0, 2).join(" / ") : "none"}
-                              </p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="glass rounded-xl p-4">
-                  <h4 className="text-sm font-semibold flex items-center gap-2 mb-3">
-                    <Link2 className="w-4 h-4 text-primary" /> Integrated Transactions Module Signals
-                  </h4>
-                  <div className="space-y-2">
-                    {linkedTransactions.length ? (
-                      linkedTransactions.map((tx) => (
-                        <div key={tx.id} className="rounded-lg border border-border bg-secondary/40 px-3 py-2">
-                          <div className="flex items-center justify-between gap-2">
-                            <p className="text-xs font-mono">{tx.id}</p>
-                            <span
-                              className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
-                                tx.riskScore >= 85
-                                  ? "bg-destructive/15 text-destructive"
-                                  : tx.riskScore >= 60
-                                  ? "bg-warning/15 text-warning"
-                                  : "bg-success/15 text-success"
-                              }`}
-                            >
-                              Risk {tx.riskScore}
-                            </span>
-                          </div>
-                          <p className="text-[11px] mt-1">
-                            {tx.from} {"->"} {tx.to}
-                          </p>
-                        </div>
-                      ))
+                  <div className="glass rounded-xl p-4">
+                    <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+                      <AlertTriangle className="w-4 h-4 text-warning" /> Case Risk Snapshot
+                    </h4>
+                    <p className="text-[10px] text-muted-foreground mb-3">
+                      Quick comparison of max and average risk across selected cases.
+                    </p>
+                    {caseRiskSnapshot.length ? (
+                      <ResponsiveContainer width="100%" height={220}>
+                        <BarChart data={caseRiskSnapshot.slice(0, 6)} layout="vertical" margin={{ top: 0, right: 6, left: 6, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 16%, 14%)" opacity={0.45} />
+                          <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10, fill: "hsl(220, 10%, 50%)" }} />
+                          <YAxis dataKey="caseId" type="category" width={68} tick={{ fontSize: 10, fill: "hsl(220, 10%, 50%)" }} />
+                          <Tooltip />
+                          <Legend wrapperStyle={{ fontSize: 10 }} />
+                          <Bar dataKey="riskMax" name="Max Risk" fill="hsl(14, 100%, 57%)" radius={[0, 4, 4, 0]} />
+                          <Bar dataKey="riskAvg" name="Avg Risk" fill="hsl(48, 96%, 53%)" radius={[0, 4, 4, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
                     ) : (
-                      <p className="text-xs text-muted-foreground">
-                        No direct transaction IDs matched from current case selection.
-                      </p>
+                      <div className="h-[220px] rounded-lg border border-dashed border-border bg-secondary/20 flex items-center justify-center">
+                        <p className="text-xs text-muted-foreground">No case risk data available.</p>
+                      </div>
                     )}
                   </div>
                 </div>
+
+                {showAdvancedNetworkPanels ? (
+                  <>
+                    <div className="glass rounded-xl p-4">
+                      <div className="flex items-center justify-between gap-2 mb-3">
+                        <h4 className="text-sm font-semibold flex items-center gap-2">
+                          <ListTree className="w-4 h-4 text-primary" /> Layer Detection System
+                        </h4>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-semibold">
+                          Total Layers: {totalLayers}
+                        </span>
+                      </div>
+
+                      <div className="grid sm:grid-cols-2 gap-2">
+                        {layerSummary.map((entry) => {
+                          const collapsed = collapsedLayers.includes(entry.layer);
+                          return (
+                            <button
+                              key={entry.layer}
+                              type="button"
+                              onClick={() => toggleLayer(entry.layer)}
+                              disabled={!investigationMode}
+                              className={`text-left rounded-lg border p-3 transition-colors disabled:cursor-not-allowed ${
+                                collapsed
+                                  ? "border-warning/50 bg-warning/10"
+                                  : "border-border bg-secondary/40 hover:border-primary/40"
+                              }`}
+                            >
+                              <p className="text-xs font-semibold">
+                                Layer {entry.layer}: {layerLabel(entry.layer)}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground mt-1">
+                                {entry.members.length} nodes | {collapsed ? "Collapsed" : "Expanded"}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground mt-1 truncate">
+                                {entry.members.map((member) => member.label).join(" | ") || "No nodes"}
+                              </p>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="glass rounded-xl p-4">
+                      <h4 className="text-sm font-semibold flex items-center gap-2 mb-2">
+                        <Network className="w-4 h-4 text-primary" /> Inter-Case Spider Map Lanes
+                      </h4>
+                      <p className="text-[10px] text-muted-foreground mb-3">
+                        Selected cases are lined by bank-account layers L1 to L4 for cross-case comparison.
+                      </p>
+                      <div className="space-y-2 max-h-[280px] overflow-y-auto pr-1">
+                        {caseLayerLanes.map((lane) => (
+                          <div key={lane.caseId} className="rounded-lg border border-border bg-secondary/40 p-2.5">
+                            <div className="flex items-start justify-between gap-2">
+                              <div>
+                                <p className="text-xs font-semibold">{lane.caseId}</p>
+                                <p className="text-[10px] text-muted-foreground">{lane.title}</p>
+                              </div>
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-accent/20 text-accent font-semibold">
+                                {lane.linkedCount} linked
+                              </span>
+                            </div>
+                            <p className="text-[10px] text-muted-foreground mt-1">
+                              Source: <span className="text-foreground">{lane.sourceLabel}</span>
+                            </p>
+                            <p className="text-[10px] text-muted-foreground">
+                              Destination: <span className="text-foreground">{lane.destinationLabels.join(" | ") || "none"}</span>
+                            </p>
+
+                            <div className="grid grid-cols-2 lg:grid-cols-4 gap-1.5 mt-2">
+                              {lane.bankLayerGroups.map((group, index) => (
+                                <div key={`${lane.caseId}-L${index + 1}`} className="rounded-md border border-border bg-background/60 p-1.5">
+                                  <p className="text-[10px] font-semibold text-primary">L{index + 1}</p>
+                                  <p className="text-[10px] text-muted-foreground">
+                                    {group.length ? group.slice(0, 2).join(" / ") : "none"}
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="glass rounded-xl p-4">
+                      <h4 className="text-sm font-semibold flex items-center gap-2 mb-3">
+                        <Link2 className="w-4 h-4 text-primary" /> Integrated Transactions Module Signals
+                      </h4>
+                      <div className="space-y-2">
+                        {linkedTransactions.length ? (
+                          linkedTransactions.map((tx) => (
+                            <div key={tx.id} className="rounded-lg border border-border bg-secondary/40 px-3 py-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-xs font-mono">{tx.id}</p>
+                                <span
+                                  className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
+                                    tx.riskScore >= 85
+                                      ? "bg-destructive/15 text-destructive"
+                                      : tx.riskScore >= 60
+                                      ? "bg-warning/15 text-warning"
+                                      : "bg-success/15 text-success"
+                                  }`}
+                                >
+                                  Risk {tx.riskScore}
+                                </span>
+                              </div>
+                              <p className="text-[11px] mt-1">
+                                {tx.from} {"->"} {tx.to}
+                              </p>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-xs text-muted-foreground">
+                            No direct transaction IDs matched from current case selection.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="glass rounded-xl p-4 border border-dashed border-border">
+                    <p className="text-xs text-muted-foreground">
+                      Advanced network panels are hidden to keep focus on required visuals and core metrics.
+                    </p>
+                  </div>
+                )}
               </div>
 
               <div className="xl:col-span-3 space-y-4">
@@ -1441,48 +1715,25 @@ export default function FraudIntelligence() {
                 </div>
 
                 <div className="glass rounded-xl p-4">
-                  <h4 className="text-sm font-semibold flex items-center gap-2 mb-3">
-                    <ScanSearch className="w-4 h-4 text-primary" /> AI Layering Detection Labels
-                  </h4>
-
-                  <div className="space-y-2.5">
-                    {aiDetectionSummary.map((entry) => {
-                      const tone =
-                        entry.score >= 90
-                          ? "bg-destructive text-destructive"
-                          : entry.score >= 75
-                          ? "bg-warning text-warning"
-                          : "bg-muted text-muted-foreground";
-
-                      return (
-                        <div key={entry.label} className="rounded-lg border border-border bg-secondary/40 p-2.5">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-xs font-semibold">{entry.label}</span>
-                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono ${tone}`}>
-                              {entry.score ? `${entry.score}%` : "No signal"}
-                            </span>
-                          </div>
-                          <div className="h-1.5 mt-2 rounded-full bg-background overflow-hidden">
-                            <div
-                              className={`h-full rounded-full ${
-                                entry.score >= 90
-                                  ? "bg-destructive"
-                                  : entry.score >= 75
-                                  ? "bg-warning"
-                                  : "bg-muted"
-                              }`}
-                              style={{ width: `${Math.max(entry.score, 4)}%` }}
-                            />
-                          </div>
-                          <p className="text-[10px] text-muted-foreground mt-1">{entry.explanation}</p>
-                        </div>
-                      );
-                    })}
+                  <h4 className="text-sm font-semibold mb-3">Operational Network Metrics</h4>
+                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                    <div className="rounded-md border border-border bg-secondary/40 px-2 py-1.5">
+                      <p className="text-muted-foreground uppercase tracking-wider">Avg Hop Risk</p>
+                      <p className="font-semibold text-warning mt-0.5">{avgHopRisk}%</p>
+                    </div>
+                    <div className="rounded-md border border-border bg-secondary/40 px-2 py-1.5">
+                      <p className="text-muted-foreground uppercase tracking-wider">Blocked Hops</p>
+                      <p className="font-semibold text-destructive mt-0.5">{blockedHopCount}</p>
+                    </div>
+                    <div className="rounded-md border border-border bg-secondary/40 px-2 py-1.5">
+                      <p className="text-muted-foreground uppercase tracking-wider">Dest Coverage</p>
+                      <p className="font-semibold text-primary mt-0.5">{destinationCoveragePct}%</p>
+                    </div>
+                    <div className="rounded-md border border-border bg-secondary/40 px-2 py-1.5">
+                      <p className="text-muted-foreground uppercase tracking-wider">Active Filter</p>
+                      <p className="font-semibold text-foreground mt-0.5">{minHopAmountLakh}L floor</p>
+                    </div>
                   </div>
-
-                  <p className="text-[10px] text-muted-foreground mt-3">
-                    Risk score per path is computed from layer depth, identity overlap, and transaction velocity.
-                  </p>
                 </div>
 
                 <InvestigationReportGenerator
@@ -1496,30 +1747,83 @@ export default function FraudIntelligence() {
                   disabled={!investigationMode}
                 />
 
-                <InvestigationWorkflowPanel
-                  selectedCaseIds={selectedCaseIds}
-                  disabled={!investigationMode}
-                />
+                {showAdvancedNetworkPanels ? (
+                  <>
+                    <div className="glass rounded-xl p-4">
+                      <h4 className="text-sm font-semibold flex items-center gap-2 mb-3">
+                        <ScanSearch className="w-4 h-4 text-primary" /> AI Layering Detection Labels
+                      </h4>
 
-                <div className="glass rounded-xl p-4">
-                  <h4 className="text-sm font-semibold mb-3">Suspicious Chain Focus</h4>
-                  <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
-                    {sortedPathRisks.length ? (
-                      sortedPathRisks.slice(0, 5).map((chain) => (
-                        <div key={chain.id} className="rounded-lg border border-border bg-secondary/40 p-2.5">
-                          <p className="text-xs font-semibold text-warning">
-                            {chain.label} ({chain.riskScore}%)
-                          </p>
-                          <p className="text-[10px] text-muted-foreground mt-1">
-                            {chain.chain.map((id) => nodeLookup[id]?.label ?? id).join(" -> ")}
-                          </p>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-xs text-muted-foreground">No suspicious chain data for selected case.</p>
-                    )}
-                  </div>
-                </div>
+                      <div className="space-y-2.5">
+                        {aiDetectionSummary.map((entry) => {
+                          const tone =
+                            entry.score >= 90
+                              ? "bg-destructive text-destructive"
+                              : entry.score >= 75
+                              ? "bg-warning text-warning"
+                              : "bg-muted text-muted-foreground";
+
+                          return (
+                            <div key={entry.label} className="rounded-lg border border-border bg-secondary/40 p-2.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-semibold">{entry.label}</span>
+                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono ${tone}`}>
+                                  {entry.score ? `${entry.score}%` : "No signal"}
+                                </span>
+                              </div>
+                              <div className="h-1.5 mt-2 rounded-full bg-background overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full ${
+                                    entry.score >= 90
+                                      ? "bg-destructive"
+                                      : entry.score >= 75
+                                      ? "bg-warning"
+                                      : "bg-muted"
+                                  }`}
+                                  style={{ width: `${Math.max(entry.score, 4)}%` }}
+                                />
+                              </div>
+                              <p className="text-[10px] text-muted-foreground mt-1">{entry.explanation}</p>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <p className="text-[10px] text-muted-foreground mt-3">
+                        Risk score per path is computed from layer depth, identity overlap, and transaction velocity.
+                      </p>
+                    </div>
+
+                    <InvestigationWorkflowPanel
+                      selectedCaseIds={selectedCaseIds}
+                      disabled={!investigationMode}
+                    />
+
+                    <div className="glass rounded-xl p-4">
+                      <h4 className="text-sm font-semibold mb-3">Suspicious Chain Focus</h4>
+                      <div className="space-y-2 max-h-[220px] overflow-y-auto pr-1">
+                        {sortedPathRisks.length ? (
+                          sortedPathRisks.slice(0, 5).map((chain) => (
+                            <div key={chain.id} className="rounded-lg border border-border bg-secondary/40 p-2.5">
+                              <p className="text-xs font-semibold text-warning">
+                                {chain.label} ({chain.riskScore}%)
+                              </p>
+                              <p className="text-[10px] text-muted-foreground mt-1">
+                                {chain.chain.map((id) => nodeLookup[id]?.label ?? id).join(" -> ")}
+                              </p>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-xs text-muted-foreground">No suspicious chain data for selected case.</p>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-[10px] text-muted-foreground px-1">
+                    Enable advanced panels for AI labels, workflow actions, and suspicious-chain diagnostics.
+                  </p>
+                )}
               </div>
             </div>
           </motion.div>

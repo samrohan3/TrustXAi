@@ -246,6 +246,21 @@ export interface SignedExportReceipt {
   signedAt: string | null;
 }
 
+export interface LocalAiReportSummaryRequest {
+  caseIds: string[];
+  prompt?: string;
+  analytics?: Record<string, unknown>;
+}
+
+export interface BackendLocalAiReportSummary {
+  provider: string;
+  model: string;
+  generated_at: string;
+  case_ids: string[];
+  summary: string;
+  usage: Record<string, unknown>;
+}
+
 export interface BackendInvestigationCaseOption {
   case_id: string;
   title: string;
@@ -839,6 +854,23 @@ export async function downloadRegulatorExportBundle(
 ): Promise<SignedExportReceipt> {
   const path = withCaseIds("/fraud-intelligence/investigation/reports/export/bundle", caseIds);
   return downloadFile(path, "trustxai-regulator-export-bundle.zip", "application/zip");
+}
+
+export async function generateLocalAiReportSummary(
+  payload: LocalAiReportSummaryRequest,
+): Promise<BackendLocalAiReportSummary> {
+  return requestJson<BackendLocalAiReportSummary>(
+    "/fraud-intelligence/investigation/reports/ai-summary",
+    {
+      method: "POST",
+      auth: true,
+      body: JSON.stringify({
+        case_ids: payload.caseIds,
+        prompt: payload.prompt,
+        analytics: payload.analytics ?? {},
+      }),
+    },
+  );
 }
 
 export async function fetchWorkflowCases(investigationCaseId?: string): Promise<BackendWorkflowCase[]> {

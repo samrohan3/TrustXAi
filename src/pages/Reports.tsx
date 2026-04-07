@@ -3,6 +3,7 @@ import { jsPDF } from "jspdf";
 import {
   Archive,
   BarChart3,
+  Bot,
   CheckCircle2,
   FileCheck2,
   FileDown,
@@ -10,6 +11,7 @@ import {
   RotateCcw,
   Search,
   ShieldCheck,
+  Sparkles,
 } from "lucide-react";
 import {
   Bar,
@@ -36,14 +38,16 @@ import {
   fetchFraudAlerts,
   fetchInvestigationAuditLogs,
   fetchInvestigationCaseOptions,
+  generateLocalAiReportSummary,
   verifyInvestigationAuditLogs,
   type BackendAlert,
   type BackendInvestigationCaseOption,
+  type BackendLocalAiReportSummary,
   type BackendTransaction,
   type SignedExportReceipt,
 } from "@/lib/backendApi";
 
-type BusyAction = "sync" | "pdf" | "csv" | "bundle" | "audit" | "chart-pdf" | null;
+type BusyAction = "sync" | "pdf" | "csv" | "bundle" | "audit" | "chart-pdf" | "ai-summary" | null;
 
 const shortHash = (value: string | null | undefined) => {
   if (!value) return "n/a";
@@ -80,6 +84,11 @@ export default function Reports() {
   const [auditReason, setAuditReason] = useState<string | null>(null);
   const [auditLogCount, setAuditLogCount] = useState<number | null>(null);
   const [auditLatestHash, setAuditLatestHash] = useState<string | null>(null);
+  const [aiPrompt, setAiPrompt] = useState(
+    "Generate a concise investigation briefing highlighting top risks and recommended immediate actions.",
+  );
+  const [aiSummary, setAiSummary] = useState<string | null>(null);
+  const [aiResponseMeta, setAiResponseMeta] = useState<BackendLocalAiReportSummary | null>(null);
 
   const syncCaseOptions = useCallback(async () => {
     if (!authToken) {
@@ -312,6 +321,58 @@ export default function Reports() {
   const reportTotalVolume = transactionRows.reduce((sum, transaction) => sum + transaction.amount, 0);
   const reportHighRiskCount = transactionRows.filter((transaction) => transaction.risk_score >= 80).length;
 
+  const reportAnalyticsPayload = useMemo(
+    () => ({
+      totals: {
+        transaction_count: transactionRows.length,
+        alert_count: alertRows.length,
+        total_volume: reportTotalVolume,
+        high_risk_transactions: reportHighRiskCount,
+      },
+      alert_severity_distribution: alertSeverityDistribution,
+      risk_band_distribution: riskBandDistribution,
+      transaction_risk_trend: transactionRiskTrend,
+      top_institutions: institutionExposure.slice(0, 5),
+    }),
+    [
+      alertRows.length,
+      alertSeverityDistribution,
+      institutionExposure,
+      reportHighRiskCount,
+      reportTotalVolume,
+      riskBandDistribution,
+      transactionRiskTrend,
+      transactionRows.length,
+    ],
+  );
+
+  const generateLocalSummary = useCallback(async () => {
+    if (!selectedCaseIds.length) {
+      setSyncMessage("Select one or more cases before generating a local AI summary.");
+      return;
+    }
+
+    setBusyAction("ai-summary");
+    setSyncMessage("Generating local AI summary with Ollama...");
+
+    try {
+      const response = await generateLocalAiReportSummary({
+        caseIds: selectedCaseIds,
+        prompt: aiPrompt,
+        analytics: reportAnalyticsPayload,
+      });
+
+      setAiSummary(response.summary);
+      setAiResponseMeta(response);
+      setSyncMessage(`Generated AI summary using ${response.model}.`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Failed to generate local AI summary.";
+      setSyncMessage(detail);
+    } finally {
+      setBusyAction(null);
+    }
+  }, [aiPrompt, reportAnalyticsPayload, selectedCaseIds]);
+
   const canExportChartsPdf =
     busyAction === null && (transactionRows.length > 0 || alertRows.length > 0);
 
@@ -531,6 +592,45 @@ export default function Reports() {
         doc.text(text, margin, y + 14 + index * 12, { maxWidth: pageWidth - margin * 2 });
       });
 
+      const pageHeight = doc.internal.pageSize.getHeight();
+      y += 14 + Math.min(institutionExposure.length, 5) * 12 + 18;
+
+      if (aiSummary) {
+        if (y + 150 > pageHeight - 36) {
+          doc.addPage();
+          y = 46;
+        }
+
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(11);
+        doc.text("Local AI Investigation Summary", margin, y);
+        y += 14;
+
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(9);
+        const wrappedSummary = doc.splitTextToSize(aiSummary, pageWidth - margin * 2) as string[];
+        const maxLines = 24;
+        const visibleLines = wrappedSummary.slice(0, maxLines);
+        doc.text(visibleLines, margin, y);
+        y += visibleLines.length * 11;
+
+        if (wrappedSummary.length > maxLines) {
+          doc.setFontSize(8);
+          doc.text("[AI summary truncated for single-page export]", margin, y + 4);
+          y += 12;
+        }
+
+        if (aiResponseMeta) {
+          doc.setFontSize(8);
+          doc.text(
+            `Model: ${aiResponseMeta.model} | Provider: ${aiResponseMeta.provider} | Generated: ${new Date(aiResponseMeta.generated_at).toLocaleString()}`,
+            margin,
+            y + 4,
+            { maxWidth: pageWidth - margin * 2 },
+          );
+        }
+      }
+
       const filename = `trustxai-analyst-visual-report-${Date.now()}.pdf`;
       doc.save(filename);
       setSyncMessage(`Downloaded ${filename} with embedded charts.`);
@@ -541,6 +641,8 @@ export default function Reports() {
       setBusyAction(null);
     }
   }, [
+    aiResponseMeta,
+    aiSummary,
     alertRows.length,
     alertSeverityDistribution,
     canExportChartsPdf,
@@ -847,6 +949,14 @@ export default function Reports() {
                 <BarChart3 className="h-3.5 w-3.5" />
                 {busyAction === "chart-pdf" ? "Building..." : "PDF with Charts"}
               </button>
+              <button
+                onClick={() => void generateLocalSummary()}
+                disabled={!canRunActions}
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-secondary px-3 py-2 text-xs font-medium hover:bg-secondary/80 disabled:cursor-not-allowed"
+              >
+                <Bot className="h-3.5 w-3.5" />
+                {busyAction === "ai-summary" ? "Thinking..." : "Local AI Summary"}
+              </button>
             </div>
 
             <div className="rounded-lg border border-border bg-secondary/30 p-3">
@@ -856,6 +966,34 @@ export default function Reports() {
                   ? selectedCaseDetails.map((entry) => entry.case_id).join(", ")
                   : "No cases selected yet."}
               </p>
+            </div>
+
+            <div className="rounded-lg border border-border bg-secondary/30 p-3 space-y-2">
+              <p className="text-[11px] font-semibold inline-flex items-center gap-1">
+                <Sparkles className="h-3.5 w-3.5 text-warning" />
+                Local Gemma2 Prompt
+              </p>
+              <textarea
+                value={aiPrompt}
+                onChange={(event) => setAiPrompt(event.target.value)}
+                rows={3}
+                className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none focus:border-primary"
+                placeholder="Ask local model for an investigation-focused summary"
+              />
+              {aiResponseMeta ? (
+                <p className="text-[10px] text-muted-foreground">
+                  Last summary by {aiResponseMeta.model} at {new Date(aiResponseMeta.generated_at).toLocaleTimeString()}
+                </p>
+              ) : null}
+              {aiSummary ? (
+                <div className="rounded-md border border-border bg-background/70 p-2">
+                  <p className="text-[11px] whitespace-pre-wrap leading-relaxed">{aiSummary}</p>
+                </div>
+              ) : (
+                <p className="text-[11px] text-muted-foreground">
+                  Generate a local AI summary to get case-level recommendations from your gemma2 model.
+                </p>
+              )}
             </div>
           </div>
 

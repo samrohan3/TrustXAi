@@ -256,6 +256,21 @@ class InvestigationAuditVerifyResponse(BaseModel):
     latest_hash: str | None = None
 
 
+class InvestigationLocalAiSummaryRequest(BaseModel):
+    case_ids: list[str] = Field(default_factory=list)
+    prompt: str | None = Field(default=None, max_length=2000)
+    analytics: dict[str, Any] = Field(default_factory=dict)
+
+
+class InvestigationLocalAiSummaryResponse(BaseModel):
+    provider: str
+    model: str
+    generated_at: datetime
+    case_ids: list[str]
+    summary: str
+    usage: dict[str, Any] = Field(default_factory=dict)
+
+
 class BlockchainEntryRead(ORMModel):
     id: int
     tx_hash: str
